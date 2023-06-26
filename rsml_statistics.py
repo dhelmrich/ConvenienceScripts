@@ -96,7 +96,7 @@ class ParseRSML :
       element = parentelementpair[0]
       rn = parentelementpair[1]
       elementlist = elementlist[1:]
-      parentnode = int(element.find("properties").find("parent-node").get("value"))
+      parentnode = int(element.find("properties").find("parent-node").get("value")) if element.find("properties").find("parent-node") != None else -1
       pl = element.find("geometry").find("polyline")
       functionnames = [f.get("name") \
         for f in (element.find("functions").findall("function"))]
@@ -145,7 +145,10 @@ class ParseRSML :
             print("Something else went wrong when trying to add the junction")
       sr = []
       for e in element.findall('root') :
-        if e.get('ID') != element.get('ID') :
+        # check if this is not just an empty <root/> element
+        if e.get('ID') == None :
+          continue
+        elif e.get('ID') != element.get('ID') :
           elementlist.append([e,element.get('ID')])
           sr.append(int(e.get('ID')))
       organlist.append(Organ(np.array(points),[].copy(),params.copy(),int(element.get('ID')), sr.copy(),int(rn), parentnode))
@@ -165,6 +168,8 @@ parser.add_argument('file', metavar='file', type=str, nargs=1,
                     help='the rsml file to quantify')
 parser.add_argument('-v', '--verbose', action='store_true',
                     help='verbose output')
+parser.add_argument('-o', '--output', metavar='output', type=str, nargs=1,
+                    help='the output file')
 parser.add_argument('-s', '--selection', metavar='selection', type=str, nargs=1,
                     help='the selection to quantify')
 
