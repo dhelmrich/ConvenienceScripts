@@ -3,15 +3,15 @@ import sys
 import os
 import logging
 from pathlib import Path
-from qt_compat import (
+from ..qt_compat import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTextEdit, QLabel, QRadioButton, QButtonGroup,
     QFileDialog, QScrollArea, QFrame, QGridLayout, QMessageBox, QDialog,
     QSizePolicy, QAbstractItemView, QMenu, QToolButton,
     Qt, QTimer, QSize, QPixmap
 )
-from project_manager import ProjectManager
-from storage.json_store import JsonStore
+from ..project_manager import ProjectManager
+from ..storage.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
 

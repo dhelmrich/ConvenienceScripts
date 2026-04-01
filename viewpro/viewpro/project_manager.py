@@ -1,5 +1,5 @@
 """Project management logic."""
-from storage.json_store import JsonStore
+from .storage.json_store import JsonStore
 
 
 class ProjectManager:

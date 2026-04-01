@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viewpro"
+version = "1.0.0"
+description = "ViewPro project manager"
+requires-python = ">=3.9"
+dependencies = [
+    "PySide6>=6.5.0; platform_system == 'Windows'",
+    "PyQt6>=6.5.0; platform_system != 'Windows'",
+]
+
+[project.scripts]
+viewpro = "viewpro.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["viewpro*"]

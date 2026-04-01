@@ -4,11 +4,11 @@ import os
 import argparse
 import logging
 from pathlib import Path
-from qt_compat import QApplication
+from .qt_compat import QApplication
 
-from ui.main_window import MainWindow
-from storage.json_store import JsonStore
-from project_manager import ProjectManager
+from .ui.main_window import MainWindow
+from .storage.json_store import JsonStore
+from .project_manager import ProjectManager
 
 
 def add_project_cli(path: str, title: str = None, description: str = None, logo: str = None):
