@@ -330,18 +330,19 @@ class MainWindow(QMainWindow):
         mode = self.get_open_mode()
         logger.info(f"Opening project '{project.get('title', 'Unknown')}' in {mode} mode, path: {path}")
         
+        self.store.update_last_clicked(path)
+        
         if mode == 'opencode':
             if os.name == 'nt':
                 os.system(f'wt -d "{path}" opencode-cli .')
             else:
                 os.system(f'nohup konsole --new-tab --workdir "{path}" -e sh -c "cd {path} && opencode-cli .; exec bash" > /dev/null 2>&1 &')
             logger.info(f"opencode-cli launched for {path}")
-            self.store.update_last_clicked(path)
         elif mode == 'terminal':
             if os.name == 'nt':
                 os.system(f'start "" cmd /k "cd /d \"{path}\""')
             else:
-                os.system(f'nohup konsole --new-tab --workdir "{path}" --title "{project.get('title', 'Terminal')}" > /dev/null 2>&1 &')
+                os.system(f'nohup konsole --new-tab --workdir "{path}" -e bash > /dev/null 2>&1 &')
             logger.info(f"Terminal launched for {path}")
         else:
             result = os.system(f'code "{path}"')
