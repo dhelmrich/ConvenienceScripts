@@ -30,6 +30,20 @@ class JsonStore:
         data = self.load()
         return data.get('projects', [])
     
+    def update_last_clicked(self, project_path: str) -> None:
+        """Update the last clicked timestamp for a project."""
+        data = self.load()
+        for project in data.get('projects', []):
+            if project.get('path') == project_path:
+                project['last_clicked'] = self._get_timestamp()
+                break
+        self.save(data)
+    
+    def _get_timestamp(self) -> str:
+        """Get current timestamp in ISO format."""
+        from datetime import datetime
+        return datetime.now().isoformat()
+    
     def add_project(self, project: dict) -> None:
         """Add a new project."""
         data = self.load()

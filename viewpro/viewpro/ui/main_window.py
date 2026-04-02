@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
     def __init__(self, project_manager: ProjectManager):
         super().__init__()
         self.project_manager = project_manager
+        self.store = project_manager.store
         self.setWindowTitle("ViewPro - Project Manager")
         self.setMinimumSize(800, 600)
         self.resize(1000, 600)
@@ -331,15 +332,16 @@ class MainWindow(QMainWindow):
         
         if mode == 'opencode':
             if os.name == 'nt':
-                os.system(f'start "" "OpenCode" .')
+                os.system(f'wt -d "{path}" opencode-cli .')
             else:
-                os.system(f'nohup sh -c "cd \"{path}\" && OpenCode ." > /dev/null 2>&1 &')
-            logger.info(f"OpenCode launched for {path}")
+                os.system(f'nohup konsole --new-tab --workdir "{path}" -e sh -c "cd {path} && opencode-cli .; exec bash" > /dev/null 2>&1 &')
+            logger.info(f"opencode-cli launched for {path}")
+            self.store.update_last_clicked(path)
         elif mode == 'terminal':
             if os.name == 'nt':
                 os.system(f'start "" cmd /k "cd /d \"{path}\""')
             else:
-                os.system(f'nohup konsole --new-tab --workdir "{path}" > /dev/null 2>&1 &')
+                os.system(f'nohup konsole --new-tab --workdir "{path}" --title "{project.get('title', 'Terminal')}" > /dev/null 2>&1 &')
             logger.info(f"Terminal launched for {path}")
         else:
             result = os.system(f'code "{path}"')

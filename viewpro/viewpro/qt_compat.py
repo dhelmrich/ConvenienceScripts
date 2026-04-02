@@ -13,5 +13,6 @@ else:
         QPushButton, QLineEdit, QTextEdit, QLabel, QRadioButton, QButtonGroup,\
         QFileDialog, QScrollArea, QFrame, QGridLayout, QMessageBox, QDialog,\
         QSizePolicy, QAbstractItemView, QMenu, QToolButton
-    from PyQt6.QtCore import Qt, QTimer, QSize, QObject, Signal
+    from PyQt6.QtCore import Qt, QTimer, QSize, QObject
+    from PyQt6.QtCore import pyqtSignal as Signal
     from PyQt6.QtGui import QPixmap, QAction

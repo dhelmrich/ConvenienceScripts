@@ -9,8 +9,10 @@ class ProjectManager:
         self.store = store or JsonStore()
     
     def get_projects(self) -> list:
-        """Get all projects."""
-        return self.store.get_projects()
+        """Get all projects sorted by last clicked time (newest first)."""
+        projects = self.store.get_projects()
+        projects.sort(key=lambda p: p.get('last_clicked', ''), reverse=True)
+        return projects
     
     def get_project_path(self, project: dict) -> str:
         """Get path from project dict."""

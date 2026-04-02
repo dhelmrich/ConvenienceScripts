@@ -42,6 +42,7 @@ echo
 
 COMMAND=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer REMOVED_TOKEN" \
     -d "{
         \"model\": \"alias-fast\",
         \"messages\": [
