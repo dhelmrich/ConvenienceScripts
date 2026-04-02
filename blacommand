@@ -1,0 +1,79 @@
+#!/bin/bash
+
+SHELL_TYPE="bash"
+
+if [ "$1" = "-t" ]; then
+    if [ -z "$2" ]; then
+        echo "Error: Shell type required after -t flag"
+        echo "Usage: blacommand [-t bash|powershell|zsh] <your request>"
+        exit 1
+    fi
+    SHELL_TYPE="$2"
+    shift 2
+fi
+
+if [ -z "$1" ]; then
+    echo "Usage: blacommand [-t bash|powershell|zsh] <your request>"
+    echo "Example: blacommand please find log files"
+    exit 1
+fi
+
+REQUEST="$*"
+
+case "$SHELL_TYPE" in
+    bash)
+        SYSTEM_PROMPT="You are a helpful assistant that only responds with a single bash command compatible with the present shell (bash). Do not include any explanation, markdown formatting, or additional text. Just the command itself."
+        ;;
+    powershell)
+        SYSTEM_PROMPT="You are a helpful assistant that only responds with a single PowerShell command compatible with the present shell (powershell). Do not include any explanation, markdown formatting, or additional text. Just the command itself."
+        ;;
+    zsh)
+        SYSTEM_PROMPT="You are a helpful assistant that only responds with a single zsh command compatible with the present shell (zsh). Do not include any explanation, markdown formatting, or additional text. Just the command itself."
+        ;;
+    *)
+        echo "Error: Unsupported shell type: $SHELL_TYPE"
+        echo "Supported types: bash, powershell, zsh"
+        exit 1
+        ;;
+esac
+
+echo "Asking alias-fast for a $SHELL_TYPE command..."
+echo
+
+COMMAND=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"model\": \"alias-fast\",
+        \"messages\": [
+            {
+                \"role\": \"system\",
+                \"content\": \"$SYSTEM_PROMPT\"
+            },
+            {
+                \"role\": \"user\",
+                \"content\": \"$REQUEST\"
+            }
+        ],
+        \"temperature\": 0.1
+    }" | jq -r '.choices[0].message.content')
+
+echo "Command returned:"
+echo
+echo "$COMMAND"
+echo
+echo "Press Ctrl+C to abort or Enter to run the command."
+read -r
+
+if [ $? -eq 0 ]; then
+    case "$SHELL_TYPE" in
+        powershell)
+            powershell -Command "$COMMAND"
+            ;;
+        zsh)
+            zsh -c "$COMMAND"
+            ;;
+        *)
+            eval "$COMMAND"
+            ;;
+    esac
+fi
