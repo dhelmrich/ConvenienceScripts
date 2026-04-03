@@ -15,7 +15,7 @@ setup(
         qt_dependency,
     ],
     entry_points={
-        "console_scripts": [
+        "gui_scripts": [
             "viewpro=viewpro.main:main",
         ],
     },

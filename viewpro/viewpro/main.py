@@ -53,7 +53,11 @@ def main():
     if args.add:
         add_project_cli(args.add, args.title, args.description, args.logo)
     else:
-        script_dir = Path(__file__).resolve().parent
+        import sys
+        if hasattr(sys, 'frozen'):
+            script_dir = Path(sys.executable).parent
+        else:
+            script_dir = Path(__file__).resolve().parent
         log_dir = script_dir / "logs"
         log_dir.mkdir(exist_ok=True)
         debug_log = log_dir / "debug.log"
