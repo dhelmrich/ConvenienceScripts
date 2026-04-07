@@ -39,12 +39,13 @@ class ProjectCard(QFrame):
         logo_label.setFixedSize(100, 100)
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_label.setText("No Logo")
-        logo_label.setStyleSheet("background-color: #eee; color: #999;")
+        logo_label.setStyleSheet("background-color: transparent; color: #999;")
         
         if project.get('logo') and os.path.exists(project['logo']):
             pixmap = QPixmap(project['logo'])
             if not pixmap.isNull():
-                logo_label.setPixmap(pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+                scaled_pixmap = pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                logo_label.setPixmap(scaled_pixmap)
         
         layout.addWidget(logo_label)
         
@@ -70,7 +71,8 @@ class ProjectCard(QFrame):
         self.setLayout(layout)
         
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("")
+        self.setStyleSheet("background-color: transparent;")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     
 
     

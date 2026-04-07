@@ -8,8 +8,13 @@ class JsonStore:
     """Handles loading and saving projects to a JSON file."""
     
     def __init__(self, filepath: str = None):
+        import sys
         if filepath is None:
-            self.filepath = Path(__file__).resolve().parent.parent / "projects.json"
+            if hasattr(sys, 'frozen'):
+                script_dir = Path(sys.executable).parent
+            else:
+                script_dir = Path(__file__).resolve().parent.parent
+            self.filepath = script_dir / "projects.json"
         else:
             self.filepath = Path(filepath)
         if not self.filepath.exists():
