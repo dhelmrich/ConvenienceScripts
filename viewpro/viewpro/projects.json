@@ -1,10 +1,87 @@
 {
   "projects": [
     {
-      "path": "C:/work/WebRTCCoupling/Synavis",
+      "path": "/home/baker/work/math-book",
+      "title": "Math Book",
+      "description": "The math thing I do as a finger exercise",
+      "logo": "/home/baker/Pictures/symbols/E31D.png",
+      "last_clicked": "2026-04-15T08:11:11.350005"
+    },
+    {
+      "path": "/home/baker/work/openproject",
+      "title": "OpenProject",
+      "description": "The place for automation.\nThe place where magic happens.",
+      "logo": "/home/baker/Downloads/openproject-icon-original-color-d69b9220.png",
+      "last_clicked": "2026-04-14T10:14:50.811797"
+    },
+    {
+      "path": "/home/baker/work/notes",
+      "title": "Notes",
+      "description": "The project for my notes",
+      "logo": "/home/baker/Pictures/symbols/1F5D2.png",
+      "last_clicked": "2026-04-23T20:21:50.100198"
+    },
+    {
+      "path": "/home/baker/vmware/shared/programming/dhelmrich_website",
+      "title": "Website",
+      "description": "The place for my website stuff",
+      "logo": "/home/baker/Downloads/db.png",
+      "last_clicked": "2026-04-15T13:47:55.685805"
+    },
+    {
+      "path": "/home/baker/work/notes/dffproposal2026",
+      "title": "DFF Proposal",
+      "description": "The proposal I am writing",
+      "logo": "/home/baker/Pictures/symbols/1F4D2.png",
+      "last_clicked": "2026-04-08T10:56:42.183646"
+    },
+    {
+      "path": "/home/baker/work/PlantVis/Synavis",
       "title": "Synavis",
       "description": "Synthetic data production",
-      "logo": "C:/Users/DirkH/OneDrive/designer/logos/s.png"
+      "logo": "/home/baker/vmware/shared/media/s.png",
+      "last_clicked": "2026-04-14T11:06:55.026744"
+    },
+    {
+      "path": "/home/baker/work/galaxyess",
+      "title": "Galaxy Pulsar",
+      "description": "The place for managing and doing galaxy.",
+      "logo": "/home/baker/Downloads/galaxy_project_logo_square.png",
+      "last_clicked": "2026-04-07T07:21:00.722416"
+    },
+    {
+      "path": "/home/baker/work/teaching",
+      "title": "Teaching repository",
+      "description": "A collection where my teaching shit goes",
+      "logo": "/home/baker/Pictures/symbols/1F5FF.png",
+      "last_clicked": "2026-04-15T13:47:55.683481"
+    },
+    {
+      "path": "/home/baker/work/ConvenienceScripts",
+      "title": "Convenience",
+      "description": "The scripts that I use to be lazy",
+      "logo": "/home/baker/Pictures/symbols/1F629.png",
+      "last_clicked": "2026-04-26T08:09:17.990706"
+    },
+    {
+      "path": "/home/baker/work/open-edx",
+      "title": "OpenEDX",
+      "description": "The LMS that we use now.",
+      "logo": "/home/baker/Pictures/Screenshot_20260402_090114.png"
+    },
+    {
+      "path": "/home/baker/work/openproject-mcp",
+      "title": "OpenProject-MCP",
+      "description": "OpenProject MCP Server",
+      "logo": "/home/baker/vmware/shared/media/Rectangle.png",
+      "last_clicked": "2026-04-15T13:47:55.697052"
+    },
+    {
+      "path": "/home/baker/work/guidelines",
+      "title": "Guidelines",
+      "description": "Guidelines repository",
+      "logo": "/home/baker/work/guidelines/docs/img/RDM_subline_fullcolor_rgb.png",
+      "last_clicked": "2026-04-15T14:04:08.160654"
     }
   ]
 }

@@ -19,6 +19,7 @@ if [ -z "$1" ]; then
 fi
 
 REQUEST="$*"
+CONTEXT=""
 
 case "$SHELL_TYPE" in
     bash)
@@ -40,6 +41,7 @@ esac
 echo "Asking alias-fast for a $SHELL_TYPE command..."
 echo
 
+<<<<<<< Updated upstream
 COMMAND=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer REMOVED_TOKEN" \
@@ -66,15 +68,82 @@ echo "Press Ctrl+C to abort or Enter to run the command."
 read -r
 
 if [ $? -eq 0 ]; then
+=======
+while true; do
+    CONTEXT_MSG=""
+    if [ -n "$CONTEXT" ]; then
+        CONTEXT_MSG="Previous failed attempts:\n$CONTEXT\n\n"
+    fi
+    
+    RAW_RESPONSE=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $BLABLADOR_TOKEN" \
+        -d "{
+            \"model\": \"alias-fast\",
+            \"messages\": [
+                {
+                    \"role\": \"system\",
+                    \"content\": \"$SYSTEM_PROMPT\"
+                },
+                {
+                    \"role\": \"user\",
+                    \"content\": \"$CONTEXT_MSG$REQUEST\"
+                }
+            ],
+            \"temperature\": 0.1
+        }")
+    
+    COMMAND=$(echo "$RAW_RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null)
+    
+    if [ -z "$COMMAND" ] || [ "$COMMAND" = "null" ]; then
+        echo "Error: Failed to get valid response from API"
+        echo "Response: $RAW_RESPONSE"
+        exit 1
+    fi
+    
+    echo "Command returned:"
+    echo
+    echo "$COMMAND"
+    echo
+    echo "Press Ctrl+C to abort or Enter to run the command."
+    read -r
+    
+>>>>>>> Stashed changes
     case "$SHELL_TYPE" in
         powershell)
-            powershell -Command "$COMMAND"
+            powershell -Command "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
             ;;
         zsh)
-            zsh -c "$COMMAND"
+            zsh -c "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
             ;;
         *)
-            eval "$COMMAND"
+            eval "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
             ;;
     esac
-fi
+    
+    COMMAND_OUTPUT=$(cat /tmp/cmd_output)
+    rm -f /tmp/cmd_output
+    
+    echo
+    if [ $COMMAND_EXIT_CODE -eq 0 ]; then
+        break
+    fi
+    
+    echo "Command failed with exit code $COMMAND_EXIT_CODE"
+    echo "Output:"
+    echo "$COMMAND_OUTPUT"
+    echo
+    
+    CONTEXT+="Previous command (exit code $COMMAND_EXIT_CODE): $COMMAND\nOutput: $COMMAND_OUTPUT\n\n"
+    
+    echo "Type 'r' to retry with a different command, or Enter to exit:"
+    read -r Retry
+    
+    if [ "$Retry" != "r" ]; then
+        break
+    fi
+    
+    echo
+    echo "Asking alias-fast for another $SHELL_TYPE command..."
+    echo
+done
