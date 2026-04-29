@@ -41,34 +41,6 @@ esac
 echo "Asking alias-fast for a $SHELL_TYPE command..."
 echo
 
-<<<<<<< Updated upstream
-COMMAND=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer REMOVED_TOKEN" \
-    -d "{
-        \"model\": \"alias-fast\",
-        \"messages\": [
-            {
-                \"role\": \"system\",
-                \"content\": \"$SYSTEM_PROMPT\"
-            },
-            {
-                \"role\": \"user\",
-                \"content\": \"$REQUEST\"
-            }
-        ],
-        \"temperature\": 0.1
-    }" | jq -r '.choices[0].message.content')
-
-echo "Command returned:"
-echo
-echo "$COMMAND"
-echo
-echo "Press Ctrl+C to abort or Enter to run the command."
-read -r
-
-if [ $? -eq 0 ]; then
-=======
 while true; do
     CONTEXT_MSG=""
     if [ -n "$CONTEXT" ]; then
@@ -108,7 +80,6 @@ while true; do
     echo "Press Ctrl+C to abort or Enter to run the command."
     read -r
     
->>>>>>> Stashed changes
     case "$SHELL_TYPE" in
         powershell)
             powershell -Command "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
