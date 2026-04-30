@@ -1,5 +1,8 @@
 """Project management logic."""
+import logging
 from .storage.json_store import JsonStore
+
+logger = logging.getLogger(__name__)
 
 
 class ProjectManager:
@@ -24,6 +27,7 @@ class ProjectManager:
         Returns True if successful, False otherwise.
         """
         if not path or not title:
+            logger.warning(f"add_project: missing path or title")
             return False
         
         path = path.strip()
@@ -33,15 +37,22 @@ class ProjectManager:
             logo = logo.strip()
         
         if not path or not title:
+            logger.warning(f"add_project: empty path or title after strip")
             return False
+        
+        logo_dest = None
+        if logo:
+            logo_dest = self.store.copy_logo(logo)
+            logger.debug(f"add_project: logo copied to {logo_dest}")
         
         project = {
             'path': path,
             'title': title,
             'description': description,
-            'logo': logo
+            'logo': str(logo_dest) if logo_dest else None
         }
         
+        logger.info(f"add_project: adding project '{title}' with logo: {project['logo']}")
         self.store.add_project(project)
         return True
     

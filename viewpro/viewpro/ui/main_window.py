@@ -40,10 +40,11 @@ logger = logging.getLogger(__name__)
 class ProjectCard(QFrame):
     """Individual project display card."""
 
-    def __init__(self, project: dict, parent_window, parent=None):
+    def __init__(self, project: dict, parent_window, app_dir: Path = None, parent=None):
         super().__init__(parent)
         self.project = project
         self._parent_window = parent_window
+        self._app_dir = app_dir
         self.setFixedSize(360, 120)
         self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
         self.setLineWidth(1)
@@ -64,16 +65,22 @@ class ProjectCard(QFrame):
         logo_label.setText("No Logo")
         logo_label.setStyleSheet("background-color: transparent; color: #999;")
 
-        if project.get("logo") and os.path.exists(project["logo"]):
-            pixmap = QPixmap(project["logo"])
-            if not pixmap.isNull():
-                scaled_pixmap = pixmap.scaled(
-                    100,
-                    100,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                logo_label.setPixmap(scaled_pixmap)
+        logo_path = project.get("logo")
+        logo_abs_path = None
+        if logo_path:
+            logo_abs_path = Path(self._app_dir) / logo_path if self._app_dir else None
+            logger.debug(f"Attempting to load logo from: {logo_abs_path}")
+            if logo_abs_path and logo_abs_path.exists():
+                pixmap = QPixmap(str(logo_abs_path))
+                if not pixmap.isNull():
+                    scaled_pixmap = pixmap.scaled(
+                        100,
+                        100,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    logo_label.setPixmap(scaled_pixmap)
+                    logger.debug(f"Logo loaded successfully: {logo_abs_path}")
 
         layout.addWidget(logo_label)
 
@@ -264,6 +271,8 @@ class MainWindow(QMainWindow):
     def _load_projects(self):
         """Load and display projects."""
         projects = self.project_manager.get_projects()
+        app_dir = self.store._get_app_dir()
+        logger.debug(f"Loading projects with app_dir: {app_dir}")
 
         self.projects_container.setMinimumWidth(760)
 
@@ -277,7 +286,7 @@ class MainWindow(QMainWindow):
         for i, project in enumerate(projects):
             row = i // 2
             col = i % 2
-            card = ProjectCard(project, self)
+            card = ProjectCard(project, self, app_dir)
             card._update_edit_button = self._update_edit_button
             self.projects_layout.addWidget(card, row, col)
         if projects:
