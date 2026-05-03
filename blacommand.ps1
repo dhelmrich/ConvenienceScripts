@@ -3,6 +3,9 @@ param(
     [ValidateSet("cmd", "powershell", "pwsh")]
     [string]$ShellType = "powershell",
     
+    [Parameter(Mandatory = $false)]
+    [switch]$Y,
+    
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$RequestParts
 )
@@ -83,7 +86,11 @@ while ($true) {
     Write-Host
     Write-Host $command
     Write-Host
-    [void](Read-Host "Press Ctrl+C to abort or Enter to run the command")
+    if ($Y) {
+        Write-Host "[Auto-run mode] Executing command..."
+    } else {
+        [void](Read-Host "Press Ctrl+C to abort or Enter to run the command")
+    }
     
     $output = & {
         try {
@@ -92,10 +99,10 @@ while ($true) {
                     cmd /c $command 2>&1
                 }
                 "powershell" {
-                    powershell -Command $command 2>&1
+                    & powershell -Command $command 2>&1
                 }
                 "pwsh" {
-                    pwsh -Command $command 2>&1
+                    & pwsh -Command $command 2>&1
                 }
             }
         } catch {
@@ -107,16 +114,18 @@ while ($true) {
     $commandOutput = $output -join "`n"
     
     Write-Host
+    Write-Host "Output:"
+    Write-Host $commandOutput
+    Write-Host
     if ($commandExitCode -eq 0) {
         break
     }
     
     Write-Host "Command failed with exit code $commandExitCode"
-    Write-Host "Output:"
-    Write-Host $commandOutput
-    Write-Host
     
-    $context += "Previous command (exit code $commandExitCode): $command`nOutput: $commandOutput`n`n"
+    if ($Y) {
+        break
+    }
     
     Write-Host "Type 'r' to retry with a different command, or Enter to exit:"
     $retry = Read-Host
