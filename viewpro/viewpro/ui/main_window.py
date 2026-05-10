@@ -386,7 +386,7 @@ class MainWindow(QMainWindow):
             logger.info(f"opencode-cli launched for {path}")
         elif mode == "terminal":
             if os.name == "nt":
-                os.system(f'start "" cmd /k "cd /d "{path}""')
+                os.system(f'start "" powershell -NoExit -Command "Set-Location -LiteralPath \"{path}\""')
             else:
                 os.system(
                     f'nohup konsole --new-tab --workdir "{path}" -e bash > /dev/null 2>&1 &'
