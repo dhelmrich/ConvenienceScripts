@@ -3,6 +3,7 @@
 import sys
 import os
 import logging
+import shutil
 from pathlib import Path
 from ..qt_compat import (
     QApplication,
@@ -35,6 +36,29 @@ from ..project_manager import ProjectManager
 from ..storage.json_store import JsonStore
 
 logger = logging.getLogger(__name__)
+
+
+def check_opencode_available() -> str | None:
+    """Check if opencode CLI is available. Returns path if found, None otherwise."""
+    if os.name == "nt":
+        path = shutil.which("opencode-cli")
+        if path:
+            return path
+        home = os.environ.get("USERPROFILE", "")
+        if home:
+            alt_path = str(Path(home, "AppData", "Local", "opencode-cli", "opencode-cli.exe"))
+            if Path(alt_path).exists():
+                return alt_path
+        return None
+    path = shutil.which("opencode")
+    if path:
+        return path
+    home = os.environ.get("HOME", "")
+    if home:
+        alt_path = str(Path(home, ".opencode", "bin", "opencode"))
+        if Path(alt_path).exists():
+            return alt_path
+    return None
 
 
 class ProjectCard(QFrame):
@@ -202,6 +226,7 @@ class MainWindow(QMainWindow):
         self.closeTimeout = 500
         logger.info("MainWindow initialization started")
 
+        self._opencode_path = check_opencode_available()
         self._build_ui()
         self._load_projects()
         logger.info("MainWindow initialization completed")
@@ -218,17 +243,25 @@ class MainWindow(QMainWindow):
 
         open_group = QButtonGroup(self)
         self.open_code_radio = QRadioButton("Open in Code Editor")
-        self.open_opencode_radio = QRadioButton("Open in Opencode")
         self.open_terminal_radio = QRadioButton("Open in Terminal")
         self.open_code_radio.setChecked(True)
 
         open_group.addButton(self.open_code_radio)
-        open_group.addButton(self.open_opencode_radio)
         open_group.addButton(self.open_terminal_radio)
 
         top_layout.addWidget(self.open_code_radio)
-        top_layout.addWidget(self.open_opencode_radio)
         top_layout.addWidget(self.open_terminal_radio)
+
+        # Check if opencode is available and add radio button if so
+        self.open_opencode_radio = None
+        if self._opencode_path:
+            self.open_opencode_radio = QRadioButton("Open in Opencode")
+            open_group.addButton(self.open_opencode_radio)
+            top_layout.addWidget(self.open_opencode_radio)
+            logger.info(f"Opencode CLI found at {self._opencode_path}, enabling Opencode mode")
+        else:
+            logger.warning("Opencode CLI not found, Opencode mode disabled")
+
         top_layout.addStretch()
 
         self.open_button = QPushButton("Open")
@@ -378,12 +411,12 @@ class MainWindow(QMainWindow):
 
         if mode == "opencode":
             if os.name == "nt":
-                os.system(f'wt -d "{path}" opencode-cli .')
+                os.system(f'wt -d "{path}" {self._opencode_path} .')
             else:
                 os.system(
-                    f'nohup konsole --new-tab --workdir "{path}" -e sh -c "cd {path} && opencode-cli .; exec bash" > /dev/null 2>&1 &'
+                    f'nohup konsole --new-tab --workdir "{path}" -e bash -c "cd {path} && {self._opencode_path} .; exec bash" > /dev/null 2>&1 &'
                 )
-            logger.info(f"opencode-cli launched for {path}")
+            logger.info(f"opencode launched for {path}")
         elif mode == "terminal":
             if os.name == "nt":
                 os.system(f'start "" powershell -NoExit -Command "Set-Location -LiteralPath \"{path}\""')
@@ -427,7 +460,7 @@ class MainWindow(QMainWindow):
 
     def get_open_mode(self) -> str:
         """Get the selected open mode: 'code', 'opencode', or 'terminal'."""
-        if self.open_opencode_radio.isChecked():
+        if self.open_opencode_radio and self.open_opencode_radio.isChecked():
             return "opencode"
         if self.open_terminal_radio.isChecked():
             return "terminal"

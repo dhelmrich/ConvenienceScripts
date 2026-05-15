@@ -82,13 +82,16 @@ while true; do
     
     case "$SHELL_TYPE" in
         powershell)
-            powershell -Command "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
+            powershell -Command "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
         zsh)
-            zsh -c "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
+            zsh -c "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
         *)
-            eval "$COMMAND" 2>&1 | tee /tmp/cmd_output; COMMAND_EXIT_CODE=$?
+            eval "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
     esac
     

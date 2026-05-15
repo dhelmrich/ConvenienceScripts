@@ -150,6 +150,74 @@ class FactStore:
     def get_all_facts(self) -> list:
         """Get all facts."""
         return self._facts.copy()
+    
+    def update_fact(self, fact_id: str, prompts: list = None, response: str = None, taxonomy: str = None, old_prompts: list = None, old_response: str = None, old_taxonomy: str = None) -> dict:
+        """Update an existing fact with optimistic concurrency control. Returns updated fact or error."""
+        for i, fact in enumerate(self._facts):
+            if fact.get('id') == fact_id:
+                if old_prompts is not None:
+                    if fact.get('prompts') != old_prompts:
+                        return {'error': f'Fact prompts changed. Expected: {old_prompts}, Current: {fact.get("prompts")}. Must match exactly (including whitespace, brackets, quotes). Call get_fact_by_id to retrieve current value.'}
+                if old_response is not None:
+                    if fact.get('response') != old_response:
+                        return {'error': f'Fact response changed. Expected: {old_response}, Current: {fact.get("response")}. Must match exactly (including whitespace, punctuation, capitalization). Call get_fact_by_id to retrieve current value.'}
+                if old_taxonomy is not None:
+                    if fact.get('taxonomy') != old_taxonomy:
+                        return {'error': f'Fact taxonomy changed. Expected: {old_taxonomy}, Current: {fact.get("taxonomy")}. Must match exactly. Call get_fact_by_id to retrieve current value.'}
+                
+                if prompts is not None:
+                    self._facts[i]['prompts'] = prompts if isinstance(prompts, list) else [prompts]
+                if response is not None:
+                    self._facts[i]['response'] = response
+                if taxonomy is not None:
+                    self._facts[i]['taxonomy'] = taxonomy
+                
+                self.save()
+                self._build_indexes()
+                return self._facts[i]
+        
+        return {'error': f'Fact with id {fact_id} not found'}
+    
+    def delete_fact(self, fact_id: str, expected_response: str = None, expected_prompts: list = None) -> dict:
+        """Delete a fact by ID with mandatory validation. Returns success status."""
+        for i, fact in enumerate(self._facts):
+            if fact.get('id') == fact_id:
+                if expected_response is not None:
+                    if fact.get('response') != expected_response:
+                        return {'success': False, 'error': f'Fact response changed. Expected: {expected_response}, Current: {fact.get("response")}. Must match exactly (including whitespace, punctuation, capitalization). Call get_fact_by_id to retrieve current value.'}
+                if expected_prompts is not None:
+                    if fact.get('prompts') != expected_prompts:
+                        return {'success': False, 'error': f'Fact prompts changed. Expected: {expected_prompts}, Current: {fact.get("prompts")}. Must match exactly (including whitespace, brackets, quotes). Call get_fact_by_id to retrieve current value.'}
+                
+                deleted_fact = self._facts.pop(i)
+                self.save()
+                self._build_indexes()
+                return {'success': True, 'deleted_id': fact_id}
+        
+        return {'success': False, 'error': f'Fact with id {fact_id} not found'}
+    
+    def search_facts(self, keyword: str) -> list:
+        """Search for facts containing a keyword in their response. Returns list of matches with metadata."""
+        keyword_lower = keyword.lower()
+        matches = []
+        
+        for fact in self._facts:
+            response = fact.get('response', '')
+            if keyword_lower in response.lower():
+                matches.append({
+                    'fact_id': fact.get('id'),
+                    'prompts': fact.get('prompts', []),
+                    'taxonomy': fact.get('taxonomy', 'Unknown')
+                })
+        
+        return matches
+    
+    def get_fact_by_id(self, fact_id: str) -> dict | None:
+        """Get a fact by its ID. Returns the full fact or None."""
+        for fact in self._facts:
+            if fact.get('id') == fact_id:
+                return fact.copy()
+        return None
 
 
 # Global fact store instance
@@ -283,6 +351,74 @@ def list_all_facts() -> list:
     """List all facts in the database."""
     store = get_fact_store()
     return store.get_all_facts()
+
+
+@mcp.tool()
+def update_fact(fact_id: str, prompts: list = None, response: str = None, taxonomy: str = None, old_prompts: list = None, old_response: str = None, old_taxonomy: str = None) -> dict:
+    """Update an existing fact in the database with optimistic concurrency control.
+    
+    IMPORTANT: The old_* parameters MUST match the current value EXACTLY (including whitespace, punctuation, capitalization, brackets).
+    If validation fails, the error message will show both expected and current values. Call get_fact_by_id first to retrieve the exact current state.
+    
+    Args:
+        fact_id: The ID of the fact to update.
+        prompts: New list of prompts that will trigger this fact.
+        response: New response text.
+        taxonomy: New taxonomy to categorize this fact.
+        old_prompts: Expected current prompts for validation (required when updating prompts). Must match exactly.
+        old_response: Expected current response for validation (required when updating response). Must match exactly.
+        old_taxonomy: Expected current taxonomy for validation (required when updating taxonomy). Must match exactly.
+    """
+    store = get_fact_store()
+    return store.update_fact(fact_id, prompts, response, taxonomy, old_prompts, old_response, old_taxonomy)
+
+
+@mcp.tool()
+def delete_fact(fact_id: str, expected_response: str = None, expected_prompts: list = None) -> dict:
+    """Delete a fact from the database with mandatory validation.
+    
+    IMPORTANT: The expected_* parameters MUST match the current value EXACTLY (including whitespace, punctuation, capitalization, brackets).
+    If validation fails, the error message will show both expected and current values. Call get_fact_by_id first to retrieve the exact current state.
+    
+    Args:
+        fact_id: The ID of the fact to delete.
+        expected_response: Expected current response for validation (required when deleting by response). Must match exactly.
+        expected_prompts: Expected current prompts for validation (required when deleting by prompts). Must match exactly.
+    """
+    store = get_fact_store()
+    return store.delete_fact(fact_id, expected_response, expected_prompts)
+
+
+@mcp.tool()
+def search_for(keyword: str) -> list:
+    """Search for facts containing a keyword in their response.
+    
+    Returns a list of matches with fact_id, prompts, and taxonomy - not the full response text.
+    Use get_fact or knowledge_about after finding relevant facts.
+    
+    Args:
+        keyword: The keyword to search for in fact responses.
+    """
+    store = get_fact_store()
+    return store.search_facts(keyword)
+
+
+@mcp.tool()
+def get_fact_by_id(fact_id: str) -> dict:
+    """Get a fact by its ID. Returns the full fact including prompts, response, and taxonomy.
+    
+    USE THIS TOOL WHEN:
+    - You need to check the current state of a fact before updating or deleting it
+    - You have a fact_id and need to see its complete details
+    
+    Args:
+        fact_id: The ID of the fact to retrieve.
+    """
+    store = get_fact_store()
+    fact = store.get_fact_by_id(fact_id)
+    if fact:
+        return fact
+    return {'error': f'Fact with id {fact_id} not found'}
 
 
 if __name__ == "__main__":
