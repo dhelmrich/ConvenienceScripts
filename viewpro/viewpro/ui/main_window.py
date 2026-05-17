@@ -41,12 +41,12 @@ logger = logging.getLogger(__name__)
 def check_opencode_available() -> str | None:
     """Check if opencode CLI is available. Returns path if found, None otherwise."""
     if os.name == "nt":
-        path = shutil.which("opencode-cli")
+        path = shutil.which("opencode")
         if path:
             return path
         home = os.environ.get("USERPROFILE", "")
         if home:
-            alt_path = str(Path(home, "AppData", "Local", "opencode-cli", "opencode-cli.exe"))
+            alt_path = str(Path(home, "AppData", "Roaming", "npm", "opencode.exe"))
             if Path(alt_path).exists():
                 return alt_path
         return None

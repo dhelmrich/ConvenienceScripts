@@ -1,4 +1,7 @@
 """Main entry point with CLI support."""
+import time
+global_system_timings = {}
+global_system_timings["main_start"] = time.time()
 
 import sys
 import os
@@ -6,12 +9,13 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from .qt_compat import QApplication
+from .qt_compat import QApplication, QTimer
 
 from .ui.main_window import MainWindow
 from .storage.json_store import JsonStore
 from .project_manager import ProjectManager
 
+global_system_timings["imports_done"] = time.time()
 
 def add_project_cli(
     path: str, title: str = None, description: str = None, logo: str = None
@@ -120,6 +124,7 @@ def main():
     )
 
     args = parser.parse_args()
+    global_system_timings["cli_parsing_done"] = time.time()
 
     if args.import_path:
         import_projects_cli(args.import_path)
@@ -171,6 +176,23 @@ def main():
         logger.info("MainWindow created, showing window")
         window.show()
         logger.info("Window shown, starting event loop")
+
+        global_system_timings["app_initialized"] = time.time()
+
+        # output first stats
+        logger.info(f"Timing - main_start: {global_system_timings['main_start']:.4f}")
+        logger.info(f"Timing - imports_done: {global_system_timings['imports_done']:.4f}")
+        logger.info(f"Timing - cli_parsing_done: {global_system_timings['cli_parsing_done']:.4f}")
+        logger.info(f"Timing - app_initialized: {global_system_timings['app_initialized']:.4f}")
+
+        # Schedule timing callback for when event loop actually starts processing
+        def on_event_loop_started():
+            global_system_timings["event_loop_started"] = time.time()
+            logger.info(f"Timing - event_loop_started: {global_system_timings['event_loop_started']:.4f}")
+            logger.info(f"  -> Time from main_start: {global_system_timings['event_loop_started'] - global_system_timings['main_start']:.4f}s")
+            logger.info(f"  -> Time from app_initialized: {global_system_timings['event_loop_started'] - global_system_timings['app_initialized']:.4f}s")
+        
+        QTimer.singleShot(0, on_event_loop_started)
 
         try:
             result = app.exec()
