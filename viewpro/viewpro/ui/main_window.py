@@ -334,8 +334,9 @@ class MainWindow(QMainWindow):
             title = dialog.title_input.text()
             description = dialog.desc_input.toPlainText()
             logo = dialog.logo_input.text().strip() or None
+            start_script = dialog.start_script_input.toPlainText().strip() or None
 
-            if self.project_manager.add_project(path, title, description, logo):
+            if self.project_manager.add_project(path, title, description, logo, start_script):
                 self._refresh_projects()
                 QMessageBox.information(self, "Success", "Project added successfully!")
             else:
@@ -358,6 +359,7 @@ class MainWindow(QMainWindow):
                 title = dialog.title_input.text().strip()
                 description = dialog.desc_input.toPlainText().strip()
                 logo = dialog.logo_input.text().strip() or None
+                start_script = dialog.start_script_input.toPlainText().strip() or None
 
                 if title:
                     projects = self.project_manager.get_projects()
@@ -366,6 +368,7 @@ class MainWindow(QMainWindow):
                             projects[i]["title"] = title
                             projects[i]["description"] = description
                             projects[i]["logo"] = logo
+                            projects[i]["start_script"] = start_script
                             break
 
                     self.project_manager.store.save({"projects": projects})
@@ -403,6 +406,7 @@ class MainWindow(QMainWindow):
         """Open project based on selected mode."""
         path = project["path"]
         mode = self.get_open_mode()
+        start_script = project.get("start_script")
         logger.info(
             f"Opening project '{project.get('title', 'Unknown')}' in {mode} mode, path: {path}"
         )
@@ -419,11 +423,22 @@ class MainWindow(QMainWindow):
             logger.info(f"opencode launched for {path}")
         elif mode == "terminal":
             if os.name == "nt":
-                os.system(f'start "" powershell -NoExit -Command "Set-Location -LiteralPath \"{path}\""')
+                if start_script:
+                    # Convert newlines to semicolons for PowerShell command chaining
+                    script_commands = start_script.replace('\n', '; ')
+                    os.system(f'start "" powershell -NoExit -Command "{script_commands}; Set-Location -LiteralPath \\"{path}\\""')
+                else:
+                    os.system(f'start "" powershell -NoExit -Command "Set-Location -LiteralPath \\"{path}\\""')
             else:
-                os.system(
-                    f'nohup konsole --new-tab --workdir "{path}" -e bash > /dev/null 2>&1 &'
-                )
+                if start_script:
+                    script_commands = start_script.replace('\n', ' && ')
+                    os.system(
+                        f'nohup konsole --new-tab --workdir "{path}" -e bash -c "{script_commands}; exec bash" > /dev/null 2>&1 &'
+                    )
+                else:
+                    os.system(
+                        f'nohup konsole --new-tab --workdir "{path}" -e bash > /dev/null 2>&1 &'
+                    )
             logger.info(f"Terminal launched for {path}")
         else:
             result = os.system(f'code "{path}"')
@@ -506,6 +521,12 @@ class AddProjectDialog(QDialog):
         logo_layout.addWidget(logo_browse)
         layout.addLayout(logo_layout)
 
+        layout.addWidget(QLabel("Start Script (optional):"))
+        self.start_script_input = QTextEdit()
+        self.start_script_input.setFixedHeight(60)
+        self.start_script_input.setPlaceholderText("e.g., conda activate 313\n./synenv/scripts/activate.ps1")
+        layout.addWidget(self.start_script_input)
+
         self.ok_button = QPushButton("Add")
         self.ok_button.clicked.connect(self.accept)
         self.cancel_button = QPushButton("Cancel")
@@ -568,6 +589,13 @@ class EditProjectDialog(QDialog):
         logo_layout.addWidget(self.logo_input)
         logo_layout.addWidget(logo_browse)
         layout.addLayout(logo_layout)
+
+        layout.addWidget(QLabel("Start Script (optional):"))
+        self.start_script_input = QTextEdit()
+        self.start_script_input.setFixedHeight(60)
+        self.start_script_input.setPlaceholderText("e.g., conda activate 313\n./synenv/scripts/activate.ps1")
+        self.start_script_input.setPlainText(project.get("start_script") or "")
+        layout.addWidget(self.start_script_input)
 
         self.ok_button = QPushButton("Save")
         self.ok_button.clicked.connect(self.accept)

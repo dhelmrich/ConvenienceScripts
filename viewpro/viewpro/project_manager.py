@@ -21,7 +21,7 @@ class ProjectManager:
         """Get path from project dict."""
         return project.get('path', '')
     
-    def add_project(self, path: str, title: str, description: str, logo: str = None) -> bool:
+    def add_project(self, path: str, title: str, description: str, logo: str = None, start_script: str = None) -> bool:
         """Add a new project.
         
         Returns True if successful, False otherwise.
@@ -35,6 +35,8 @@ class ProjectManager:
         description = description.strip()
         if logo:
             logo = logo.strip()
+        if start_script:
+            start_script = start_script.strip()
         
         if not path or not title:
             logger.warning(f"add_project: empty path or title after strip")
@@ -49,7 +51,8 @@ class ProjectManager:
             'path': path,
             'title': title,
             'description': description,
-            'logo': str(logo_dest) if logo_dest else None
+            'logo': str(logo_dest) if logo_dest else None,
+            'start_script': start_script
         }
         
         logger.info(f"add_project: adding project '{title}' with logo: {project['logo']}")
