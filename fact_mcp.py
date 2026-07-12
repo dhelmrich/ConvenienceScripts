@@ -143,6 +143,13 @@ class FactStore:
         self._build_indexes()
         return len(facts)
     
+    def import_facts_from_file(self, filepath: str) -> int:
+        """Import facts from a JSON file. Returns count of imported facts."""
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+            facts = data.get('facts', [])
+            return self.import_facts(facts)
+    
     def export_facts(self) -> dict:
         """Export all facts."""
         return {'facts': self._facts.copy()}
@@ -336,6 +343,21 @@ def import_facts(json_data: str) -> dict:
         return {'success': True, 'imported_count': count}
     except json.JSONDecodeError as e:
         return {'success': False, 'error': f'Invalid JSON: {str(e)}'}
+
+@mcp.tool()
+def import_facts_from_file(filepath: str) -> dict:
+    """Import facts from a JSON file.
+    
+    Args:
+        filepath: Path to the JSON file containing facts in the format:
+                  {"facts": [{"prompts": [...], "response": "...", "taxonomy": "..."}]}
+    """
+    try:
+        store = get_fact_store()
+        count = store.import_facts_from_file(filepath)
+        return {'success': True, 'imported_count': count}
+    except Exception as e:
+        return {'success': False, 'error': f'Error importing from file: {str(e)}'}
 
 
 @mcp.tool()
