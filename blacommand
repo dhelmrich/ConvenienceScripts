@@ -1,20 +1,28 @@
 #!/bin/bash
 
 SHELL_TYPE="bash"
+AUTO_RUN=false
 
 if [ "$1" = "-t" ]; then
     if [ -z "$2" ]; then
         echo "Error: Shell type required after -t flag"
-        echo "Usage: blacommand [-t bash|powershell|zsh] <your request>"
+        echo "Usage: blacommand [-t bash|powershell|zsh] [-y] <your request>"
         exit 1
     fi
     SHELL_TYPE="$2"
     shift 2
 fi
 
+if [ "$1" = "-y" ] || [ "$1" = "-Y" ]; then
+    AUTO_RUN=true
+    shift
+fi
+
 if [ -z "$1" ]; then
-    echo "Usage: blacommand [-t bash|powershell|zsh] <your request>"
+    echo "Usage: blacommand [-t bash|powershell|zsh] [-y] <your request>"
     echo "Example: blacommand please find log files"
+    echo "  -t shell_type  Specify shell type (bash, powershell, zsh)"
+    echo "  -y             Auto-run mode (skip confirmation before execution)"
     exit 1
 fi
 
@@ -44,8 +52,13 @@ echo
 while true; do
     CONTEXT_MSG=""
     if [ -n "$CONTEXT" ]; then
-        CONTEXT_MSG="Previous failed attempts:\n$CONTEXT\n\n"
+        CONTEXT_MSG="Previous failed attempts:
+$CONTEXT
+
+"
     fi
+    
+    USER_CONTENT="${CONTEXT_MSG}${REQUEST}"
     
     RAW_RESPONSE=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
         -H "Content-Type: application/json" \
@@ -55,11 +68,11 @@ while true; do
             \"messages\": [
                 {
                     \"role\": \"system\",
-                    \"content\": \"$SYSTEM_PROMPT\"
+                    \"content\": \"$(echo "$SYSTEM_PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g')\"
                 },
                 {
                     \"role\": \"user\",
-                    \"content\": \"$CONTEXT_MSG$REQUEST\"
+                    \"content\": $(echo "$USER_CONTENT" | jq -Rs .)
                 }
             ],
             \"temperature\": 0.1
@@ -73,12 +86,66 @@ while true; do
         exit 1
     fi
     
-    echo "Command returned:"
-    echo
-    echo "$COMMAND"
-    echo
-    echo "Press Ctrl+C to abort or Enter to run the command."
-    read -r
+    # Allow multiple rounds of appending instructions before execution
+    while true; do
+        echo "Command returned:"
+        echo
+        echo "$COMMAND"
+        echo
+        
+        if [ "$AUTO_RUN" = true ]; then
+            echo "[Auto-run mode] Executing command..."
+            break
+        fi
+        
+        echo "Press Ctrl+C to abort, Enter to run, or 's' to append instructions."
+        read -r response
+        
+        if [ "$response" = "s" ]; then
+            echo "Enter additional instructions:"
+            read -r additional_instructions
+            if [ -n "$additional_instructions" ]; then
+                REQUEST="$REQUEST $additional_instructions"
+                echo "Updated request: $REQUEST"
+                echo
+                echo "Re-asking alias-fast with updated request..."
+                echo
+                
+                # Re-fetch command with updated request
+                USER_CONTENT="${CONTEXT_MSG}${REQUEST}"
+                
+                RAW_RESPONSE=$(curl -s -X POST "https://api.blablador.fz-juelich.de/v1/chat/completions" \
+                    -H "Content-Type: application/json" \
+                    -H "Authorization: Bearer $BLABLADOR_TOKEN" \
+                    -d "{
+                        \"model\": \"alias-fast\",
+                        \"messages\": [
+                            {
+                                \"role\": \"system\",
+                                \"content\": \"$(echo "$SYSTEM_PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g')\"
+                            },
+                            {
+                                \"role\": \"user\",
+                                \"content\": $(echo "$USER_CONTENT" | jq -Rs .)
+                            }
+                        ],
+                        \"temperature\": 0.1
+                    }")
+                
+                COMMAND=$(echo "$RAW_RESPONSE" | jq -r '.choices[0].message.content' 2>/dev/null)
+                
+                if [ -z "$COMMAND" ] || [ "$COMMAND" = "null" ]; then
+                    echo "Error: Failed to get valid response from API"
+                    echo "Response: $RAW_RESPONSE"
+                    exit 1
+                fi
+                
+                continue
+            fi
+        else
+            break
+        fi
+    done
     
     case "$SHELL_TYPE" in
         powershell)
@@ -100,15 +167,22 @@ while true; do
     
     echo
     if [ $COMMAND_EXIT_CODE -eq 0 ]; then
-        break
+        if [ "$AUTO_RUN" = true ]; then
+            break
+        fi
+        echo "Command completed. Did it work as expected?"
+        read -r success
+        if [ "$success" != "n" ]; then
+            break
+        fi
+        CONTEXT+="Previous command (exit code $COMMAND_EXIT_CODE): $COMMAND\nOutput: $COMMAND_OUTPUT\nUser reported: command did not work as expected\n\n"
+    else
+        echo "Command failed with exit code $COMMAND_EXIT_CODE"
+        echo "Output:"
+        echo "$COMMAND_OUTPUT"
+        echo
+        CONTEXT+="Previous command (exit code $COMMAND_EXIT_CODE): $COMMAND\nOutput: $COMMAND_OUTPUT\n\n"
     fi
-    
-    echo "Command failed with exit code $COMMAND_EXIT_CODE"
-    echo "Output:"
-    echo "$COMMAND_OUTPUT"
-    echo
-    
-    CONTEXT+="Previous command (exit code $COMMAND_EXIT_CODE): $COMMAND\nOutput: $COMMAND_OUTPUT\n\n"
     
     echo "Type 'r' to retry with a different command, or Enter to exit:"
     read -r Retry
