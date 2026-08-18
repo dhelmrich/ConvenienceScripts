@@ -384,6 +384,35 @@ def main():
     
     with open(output_path, "w") as f:
         json.dump(new_providers, f, indent=2)
+
+    dcp_config = {}
+    # also read in ~/.config/opencode/dcp.jsonc
+    with open(home / ".config" / "opencode" / "dcp.jsonc", "r") as f:
+        dcp_content = f.read()
+        # we update with a clean write in both modelMaxLimits and modelMinLimits
+        # as such:
+        # "modelMaxLimits": {
+        #   "model_name": max_tokens * 0.8,
+        #   ...
+        # }
+        dcp_content = re.sub(r"^\s*//.*$", "", dcp_content, flags=re.MULTILINE)
+        dcp_content = re.sub(r",(\s*[\]}])", r"\1", dcp_content)
+        dcp_config = json.loads(dcp_content)
+    dcp_config["$schema"] = dcp_config.get("$schema", "https://raw.githubusercontent.com/Opencode-DCP/opencode-dynamic-context-pruning/master/dcp.schema.json")
+    compress = dcp_config.get("compress", {})
+    model_max_limits = compress.get("modelMaxLimits", {})
+    model_min_limits = compress.get("modelMinLimits", {})
+    for provider in new_providers:
+        for model in provider["models"]:
+            model_name = model["name"]
+            max_tokens = model.get("maxInputTokens", 0) + model.get("maxOutputTokens", 0)
+            if max_tokens > 0:
+                model_max_limits[model_name] = int(max_tokens * 0.8)  # use 80% of total tokens as max limit
+                model_min_limits[model_name] = int(max_tokens * 0.2)  # use 20% of total tokens as min limit
+    dcp_config["compress"]["modelMaxLimits"] = model_max_limits
+    dcp_config["compress"]["modelMinLimits"] = model_min_limits
+    with open(home / ".config" / "opencode" / "dcp.jsonc", "w") as f:
+        json.dump(dcp_config, f, indent=2)
     
     print(f"\nWritten {sum(len(p['models']) for p in new_providers)} models to {output_path}")
 
