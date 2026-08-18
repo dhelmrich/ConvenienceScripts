@@ -433,11 +433,11 @@ class MainWindow(QMainWindow):
                 if start_script:
                     script_commands = start_script.replace('\n', ' && ')
                     os.system(
-                        f'nohup konsole --new-tab --workdir "{path}" -e bash -c "{script_commands}; exec bash" > /dev/null 2>&1 &'
+                        f'nohup konsole --new-tab --workdir "{path}" -e bash -c "source ~/.bashrc; {script_commands}; exec bash" > /dev/null 2>&1 &'
                     )
                 else:
                     os.system(
-                        f'nohup konsole --new-tab --workdir "{path}" -e bash > /dev/null 2>&1 &'
+                        f'nohup konsole --new-tab --workdir "{path}" -e bash -c "source ~/.bashrc; exec bash" > /dev/null 2>&1 &'
                     )
             logger.info(f"Terminal launched for {path}")
         else:
