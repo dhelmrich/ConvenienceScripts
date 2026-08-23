@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf-mcp-server"
+version = "0.1.0"
+description = "FastMCP server for robust PDF ingestion and analysis with OCR fallback"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "markitdown[all]>=0.1.1,<0.2.0",
+    "pdfplumber>=0.10.0",
+    "pdfminer.six>=20221105",
+    "pytesseract>=0.3.10",
+    "pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "pdf2image>=1.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+pdf-mcp-server = "pdf_mcp.server:run_server"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdf_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
