@@ -19,6 +19,10 @@ class PageContent(BaseModel):
     warnings: List[str] = Field(
         default_factory=list, description="Warnings about extraction issues"
     )
+    diagnostics: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Per-page extraction diagnostics and provenance for RAG",
+    )
 
 
 class PDFMetadata(BaseModel):

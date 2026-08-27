@@ -620,15 +620,20 @@ async def pdf_search(
     """
     Search for text within a registered document.
 
+    The search is whitespace-insensitive: it matches the query regardless of
+    intermediate whitespaces (spaces, tabs, newlines) between words or characters.
+
     Args:
         doc_id: Document ID from pdf_register
-        query: Search query (plain text)
+        query: Search query (plain text); whitespace in query is normalized
         page_numbers: Optional page filter (e.g., "1,3-5" or "all")
         max_results: Maximum number of results to return
         context_chars: Characters of context around each match
 
     Returns:
-        Search results with snippets and citations
+        Search results with snippets, locations, and citations. Each result
+        includes page_number, position (character offset), matched text, and
+        surrounding context.
     """
     doc = _registered_docs.get(doc_id)
 
@@ -647,8 +652,19 @@ async def pdf_search(
     else:
         filter_pages = list(range(1, doc["total_pages"] + 1))
 
-    # Search query
-    query_lower = query.lower()
+    # Build whitespace-insensitive regex pattern from query
+    # Split query into words and allow any whitespace between them
+    query_words = query.lower().split()
+    if len(query_words) == 1:
+        # Single word: allow whitespace between characters
+        pattern = r"\s*".join(re.escape(c) for c in query_words[0])
+    else:
+        # Multiple words: allow whitespace within and between words
+        word_patterns = []
+        for word in query_words:
+            word_patterns.append(r"\s*".join(re.escape(c) for c in word))
+        pattern = r"\s+".join(word_patterns)
+    
     results = []
 
     for page_num in filter_pages:
@@ -668,23 +684,20 @@ async def pdf_search(
         text = re.sub(r"\[([^\]]*)\]\([^\)]+\)", r"\1", text)
         text = re.sub(r"\|", " ", text)
         text = re.sub(r"-{2,}", "", text)
-        text = re.sub(r"\s+", " ", text)
         text = text.strip()
 
-        # Find matches
+        # Find matches using regex (whitespace-insensitive)
         text_lower = text.lower()
-        start = 0
-        while True:
-            pos = text_lower.find(query_lower, start)
-            if pos == -1:
-                break
+        for match in re.finditer(pattern, text_lower, re.IGNORECASE):
+            pos = match.start()
+            matched_text = match.group()
 
             # Get context
             context_start = max(0, pos - context_chars)
-            context_end = min(len(text), pos + len(query) + context_chars)
+            context_end = min(len(text), pos + len(matched_text) + context_chars)
             context_before = text[context_start:pos]
-            snippet = text[pos:pos + len(query)]
-            context_after = text[pos + len(query):context_end]
+            snippet = text[pos:pos + len(matched_text)]
+            context_after = text[pos + len(matched_text):context_end]
 
             results.append({
                 "page_number": page_num,
@@ -692,9 +705,8 @@ async def pdf_search(
                 "snippet": snippet,
                 "context_after": context_after[:50] if len(context_after) > 50 else context_after,
                 "position": pos,
+                "match_length": len(matched_text),
             })
-
-            start = pos + 1
 
             if len(results) >= max_results:
                 break
@@ -709,6 +721,7 @@ async def pdf_search(
         "results": results[:max_results],
         "total_matches": len(results),
         "pages_searched": len(filter_pages),
+        "pattern_used": pattern,
     }
 
 
@@ -724,7 +737,13 @@ async def pdf_query(
     Query a document for relevant passages related to a question.
 
     This performs keyword-based retrieval, returning bounded passages
-    with page citations.
+    with page citations. Keywords are matched irrespective of intermediate
+    whitespaces (spaces, tabs, newlines).
+
+    The response includes:
+    - passages: Relevant content passages with citations
+    - keyword_occurrences: For each keyword, a list of all occurrences with
+      page_number, position (character offset), and matched text
 
     Args:
         doc_id: Document ID from pdf_register
@@ -734,7 +753,7 @@ async def pdf_query(
         max_chars: Maximum total characters
 
     Returns:
-        Relevant passages with citations
+        Relevant passages with citations and keyword occurrence locations
     """
     doc = _registered_docs.get(doc_id)
 
@@ -751,8 +770,12 @@ async def pdf_query(
     if not keywords:
         keywords = [question.lower()]
 
-    # Score pages by keyword match
+    # Score pages by keyword match (whitespace-insensitive)
     page_scores: Dict[int, int] = {}
+    keyword_occurrences: Dict[str, List[Dict[str, Any]]] = {}
+
+    for kw in keywords:
+        keyword_occurrences[kw] = []
 
     for page_num in range(1, doc["total_pages"] + 1):
         idx = page_num - 1
@@ -760,7 +783,7 @@ async def pdf_query(
             continue
 
         pc = doc["page_contents"][idx]
-        text = re.sub(r"```[\s\S]*?```", "", pc.markdown).lower()
+        text = re.sub(r"```[\s\S]*?```", "", pc.markdown)
         text = re.sub(r"`[^`]+`", "", text)
         text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
         text = re.sub(r"\*([^*]+)\*", r"\1", text)
@@ -769,19 +792,46 @@ async def pdf_query(
         text = re.sub(r"^\s*\d+\.\s*", "", text, flags=re.MULTILINE)
         text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", text)
         text = re.sub(r"\[([^\]]*)\]\([^\)]+\)", r"\1", text)
+        text = re.sub(r"-{2,}", "", text)
+        text_clean = text.strip()
+        text_lower = text_clean.lower()
 
-        score = sum(1 for kw in keywords if kw in text)
+        score = 0
+        for kw in keywords:
+            # Build whitespace-insensitive pattern for keyword
+            pattern = r"\s*".join(re.escape(c) for c in kw)
+            
+            # Find all occurrences
+            for match in re.finditer(pattern, text_lower, re.IGNORECASE):
+                pos = match.start()
+                matched_text = match.group()
+                
+                keyword_occurrences[kw].append({
+                    "page_number": page_num,
+                    "position": pos,
+                    "matched_text": matched_text,
+                    "context": text_clean[max(0, pos-30):pos+len(matched_text)+30],
+                })
+                score += 1
+
         if score > 0:
             page_scores[page_num] = score
 
-    # Sort by score and filter
+    # Filter pages if specified
     if page_numbers:
         try:
             filter_pages = set(parse_page_range(page_numbers, doc["total_pages"]))
             page_scores = {k: v for k, v in page_scores.items() if k in filter_pages}
+            # Also filter keyword occurrences
+            for kw in keyword_occurrences:
+                keyword_occurrences[kw] = [
+                    occ for occ in keyword_occurrences[kw]
+                    if occ["page_number"] in filter_pages
+                ]
         except ValueError as e:
             return {"success": False, "error": str(e)}
 
+    # Sort by score and get top pages
     sorted_pages = sorted(page_scores.items(), key=lambda x: -x[1])
     top_pages = [p for p, _ in sorted_pages[:max_pages]]
 
@@ -791,6 +841,7 @@ async def pdf_query(
             "doc_id": doc_id,
             "question": question,
             "passages": [],
+            "keyword_occurrences": keyword_occurrences,
             "message": "No relevant content found",
         }
 
@@ -839,6 +890,9 @@ async def pdf_query(
         "passages": formatted_passages,
         "total_passages": len(passages),
         "total_chars": total_chars,
+        "keywords_searched": keywords,
+        "keyword_occurrences": keyword_occurrences,
+        "total_occurrences": sum(len(occ) for occ in keyword_occurrences.values()),
     }
 
 
@@ -879,6 +933,7 @@ def run_server(
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: int = 8000,
+    clear_cache: bool = False,
 ):
     """Run the MCP server.
 
@@ -889,6 +944,8 @@ def run_server(
         host: Bind address for http transport (use ``0.0.0.0`` to be reachable
             from other machines, e.g. the Windows host when running in WSL).
         port: Port for http transport.
+        clear_cache: If True, clear the on-disk cache before starting so the
+            next ``pdf_register`` reprocesses documents with current code.
     """
     logger.info("Starting PDF MCP Server...")
 
@@ -897,6 +954,10 @@ def run_server(
 
     cache = get_cache()
     logger.info(f"Cache directory: {cache.cache_dir}")
+
+    if clear_cache:
+        logger.info("Clearing cache before start (--clear-cache)")
+        cache.clear()
 
     if transport == "http":
         logger.info(f"HTTP transport on http://{host}:{port}/mcp")
@@ -917,6 +978,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
     parser.add_argument("--port", type=int, default=8000, help="HTTP bind port")
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear the on-disk cache before starting (useful when testing)",
+    )
     args = parser.parse_args()
 
-    run_server(args.transport, args.host, args.port)
+    run_server(args.transport, args.host, args.port, clear_cache=args.clear_cache)
