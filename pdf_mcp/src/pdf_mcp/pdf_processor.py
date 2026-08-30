@@ -44,6 +44,34 @@ except ImportError:
     Image = None  # type: ignore
     pytesseract = None  # type: ignore
 
+# pix2tex (LaTeX-OCR) is an OPTIONAL, heavy dependency (torch + albumentations).
+# It is never imported at server startup: doing so slows down the server, emits
+# many third-party warnings, and (via albumentations' update check) makes an
+# unsolicited network call. LaTeX transcription is therefore loaded lazily on
+# the first explicit request, is ON by default whenever the package is
+# installed, and can be turned off with PDF_MCP_NO_LATEX=1. Either way the
+# network update check is disabled.
+_PIX2TEX_AVAILABLE = False
+
+
+def _pix2tex_available() -> bool:
+    """Lazily load the pix2tex transcription backend (opt-out via env var)."""
+    global _PIX2TEX_AVAILABLE
+    if _PIX2TEX_AVAILABLE:
+        return True
+    if os.environ.get("PDF_MCP_NO_LATEX"):
+        return False
+    try:
+        os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+        from pix2tex.cli import LatexOCR  # noqa: F401, PLC0415
+
+        _PIX2TEX_AVAILABLE = True
+    except ImportError:
+        logger.debug("pix2tex not installed; no LaTeX transcription")
+        return False
+    return _PIX2TEX_AVAILABLE
+
+
 from .models import PageContent
 from .utils import MIN_TEXT_THRESHOLD, PDFValidationError
 
@@ -371,6 +399,149 @@ def _text_from_words(words) -> str:
     return " ".join(w[4] for w in sorted(words, key=lambda w: (round(w[1], 1), w[0])))
 
 
+# ---------------------------------------------------------------------------
+# Display-formula detection (geometry-based)
+# ---------------------------------------------------------------------------
+
+_MATH_SYMS = set("∫∑ΣγΩ±∂⋯∈≤≥·×→σδλµ∏√∞≈≠∝∅⊂⊃≅⊥αβθΛΞΦΨΓδπεφρτχ")
+
+
+def _is_symbol_font(font: str) -> bool:
+    return "symbol" in font.lower()
+
+
+def _is_math_char(ch: str) -> bool:
+    return ch in _MATH_SYMS
+
+
+def _formula_row_key(y0: float, y1: float) -> int:
+    return round((y0 + y1) / 2.0)
+
+
+class FormulaRegion:
+    """A detected display-formula region on a page."""
+
+    __slots__ = ("page", "number", "bbox", "text")
+
+    def __init__(self, page: int, number: int, bbox, text: str):
+        self.page = page
+        self.number = number
+        self.bbox = bbox  # (x0, y0, x1, y1)
+        self.text = text
+
+
+def detect_formula_regions(page, body_size: float = 11.0, wm_x: float = 560.0,
+                           hdr_y: float = 95.0) -> List[FormulaRegion]:
+    """
+    Detect display-formula regions on a page from glyph geometry.
+
+    Works column-by-column (uses the detected gutter when present). A display
+    formula is a vertical cluster of math-bearing glyphs with 2D structure
+    (fractions, integrals/sums with limits, sub/superscripts). Prose lines that
+    merely reference inline math (e.g. ``where ps(γ) = ...``) contain common
+    English words, so they are used as *boundaries* that separate consecutive
+    equations rather than bridging them into a single region.
+
+    Returns regions in reading order (top-to-bottom, left-column first), each
+    carrying a per-page sequence number and a best-effort linear text.
+    """
+    seg = page_segment_regions(page)
+    split = seg["col_split_x"]
+    if split is None:
+        max_x = max((w[2] for w in page.get_text("words")), default=0.0)
+        wm_x = max(555.0, max_x - _WM_MARGIN)
+
+    regions: List[FormulaRegion] = []
+
+    def collect_column(x_min: float, x_max: float) -> List[FormulaRegion]:
+        """Detect formulas within a single column x-window."""
+        rd = page.get_text("rawdict")
+        rows: Dict[int, List[tuple]] = {}
+
+        for block in rd["blocks"]:
+            if block["type"] != 0 or block["bbox"][0] >= x_max:
+                continue
+            if block["bbox"][3] < hdr_y or block["bbox"][2] <= x_min:
+                continue
+            for line in block["lines"]:
+                line_glyphs = []
+                for span in line["spans"]:
+                    size = span["size"]
+                    font = span["font"]
+                    is_sub = size < 0.8 * body_size
+                    for ch in span["chars"]:
+                        chx0, chy0, chx1, chy1 = ch["bbox"]
+                        c = ch["c"]
+                        if chx0 < x_min or chx1 >= x_max:
+                            continue
+                        if c.strip() == "":
+                            continue
+                        if _is_symbol_font(font) or _is_math_char(c) or is_sub:
+                            line_glyphs.append((chx0, chy0, chx1, chy1, c))
+                for g in line_glyphs:
+                    rows.setdefault(_formula_row_key(g[1], g[3]), []).append(g)
+
+        if not rows:
+            return []
+
+        # Normalise text: drop private-use glyph fragments (F8xx ligature
+        # markers) that pollute the linear fallback text.
+        def row_text(gs):
+            return "".join(
+                "" if 0xE000 <= ord(g[4]) <= 0xF8FF else g[4]
+                for g in sorted(gs, key=lambda g: g[0])
+            )
+
+        # Cluster rows into bands separated by a vertical whitespace moat.
+        # Intra-equation rows are tightly stacked (sub/superscripts, fraction
+        # bars); a text-line gap (roughly a body line height) means we have
+        # passed to a new equation (or to surrounding prose), so start a new
+        # band. The text between bands carrying math symbols is the prose.
+        moat = body_size * 1.4  # ~15pt: comfortably above intra-stack gaps.
+        sorted_rows = sorted(rows.items())
+        bands: List[List] = [[sorted_rows[0]]]
+        for y, gs in sorted_rows[1:]:
+            prev_y = bands[-1][-1][0]
+            if y - prev_y > moat:
+                bands.append([(y, gs)])
+            else:
+                bands[-1].append((y, gs))
+
+        out: List[FormulaRegion] = []
+        for band in bands:
+            x0 = min(g[2] for _, gs in band for g in gs)
+            x1 = max(g[0] for _, gs in band for g in gs)
+            y0 = min(g[1] for _, gs in band for g in gs)
+            y1 = max(g[3] for _, gs in band for g in gs)
+            # Keep only bands that are genuinely display equations: tall/stacked
+            # enough to indicate fractions, integrals or sums (not a lone
+            # inline symbol). Prune spurious thin slivers.
+            if (y1 - y0) >= 1.9 * body_size:
+                out.append(
+                    FormulaRegion(
+                        0, 0,
+                        (round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1)),
+                        "".join(row_text(gs) for _, gs in band),
+                    )
+                )
+        return out
+
+    if split is not None:
+        regions = collect_column(0.0, split)
+        # Drop regions that are entirely to the right of the gutter (shouldn't
+        # happen given the split, but guard against gaps in the rawdict).
+        regions = [r for r in regions if r.bbox[0] < split]
+        regions.extend(collect_column(split, wm_x))
+    else:
+        regions = collect_column(0.0, wm_x)
+
+    page_number = page.number if hasattr(page, "number") else 0
+    for i, region in enumerate(regions, start=1):
+        region.page = page_number
+        region.number = i
+    return regions
+
+
 def _parse_conf(value) -> Optional[float]:
     """Parse a Tesseract conf entry (str or int) into 0..1 or None."""
     if value is None:
@@ -424,6 +595,7 @@ class PDFProcessor:
         self.min_text_threshold = min_text_threshold
         self.max_pages = max_pages
         self._current_pdf_path: Optional[Path] = None
+        self._latex_ocr = None
 
         # Configure Tesseract
         if tesseract_path:
@@ -680,6 +852,68 @@ class PDFProcessor:
         )
 
         return page_contents, metadata
+
+    def _dominant_body_size(self, page, wm_x: float, hdr_y: float) -> float:
+        """Estimate the dominant body font size of a page from its spans."""
+        sizes = Counter()
+        for block in page.get_text("rawdict")["blocks"]:
+            if block["type"] != 0:
+                continue
+            bx0, _, _, by1 = block["bbox"]
+            if bx0 >= wm_x or by1 < hdr_y:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    n = sum(1 for c in span["chars"] if c["c"].strip())
+                    if n:
+                        sizes[round(span["size"], 1)] += n
+        if not sizes:
+            return 11.0
+        return float(max(sizes, key=sizes.get))
+
+    def crop_formula_image(self, pdf_path: Path, page_number: int,
+                           bbox, dpi: int = 300) -> Optional[bytes]:
+        """
+        Render a formula region as a PNG image crop from the given page.
+
+        ``bbox`` is a (x0, y0, x1, y1) tuple in PDF points; ``dpi`` controls
+        render resolution. Returns PNG bytes or None on failure.
+        """
+        try:
+            doc = pymupdf.open(str(pdf_path))
+            page = doc[page_number - 1]
+            clip = pymupdf.Rect(*bbox)
+            pix = page.get_pixmap(clip=clip, dpi=dpi,
+                                  colorspace=pymupdf.csGRAY)
+            data = pix.tobytes("png")
+            doc.close()
+            return data
+        except Exception as e:
+            logger.warning(f"Formula crop failed page {page_number}: {e}")
+            return None
+
+    def transcribe_formula_image(self, image_bytes: bytes) -> Optional[str]:
+        """
+        Transcribe a cropped formula image to LaTeX via pix2tex (LaTeX-OCR).
+
+        pix2tex (a heavy torch dependency) is loaded lazily on first use and is
+        ON by default when installed; set ``PDF_MCP_NO_LATEX=1`` to disable it.
+        Returns None when unavailable or on failure, so callers can fall back
+        to the raw cropped image.
+        """
+        if not _pix2tex_available():
+            return None
+        try:
+            from pix2tex.cli import LatexOCR  # noqa: PLC0415
+
+            if self._latex_ocr is None:
+                self._latex_ocr = LatexOCR()
+            img = Image.open(io.BytesIO(image_bytes))
+            return self._latex_ocr(img)
+        except Exception as e:
+            logger.warning(f"pix2tex transcription failed: {e}")
+            return None
+
     def _process_page_region_aware(self, page, page_number: int) -> PageContent:
         """
         Process a single page with the region-aware extraction mode.
@@ -851,6 +1085,19 @@ class PDFProcessor:
                 p["blablador_reasoning"] = blablador_note.get("reasoning")
 
         diagnostics["provenance"] = provenance
+
+        # --- Display-formula detection (geometry-based, additive) ---
+        body_size = self._dominant_body_size(page, wm_x, hdr_y)
+        diagnostics["formulas"] = [
+            {
+                "page": page_number,
+                "number": f.number,
+                "bbox": list(f.bbox),
+                "text": f.text,
+            }
+            for f in detect_formula_regions(page, body_size=body_size,
+                                            wm_x=wm_x, hdr_y=hdr_y)
+        ]
 
         # --- Selective OCR: skip lines that were LLM-fixed ---
         text_length = len(self._extract_text(final_text))
