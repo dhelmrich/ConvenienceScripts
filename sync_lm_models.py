@@ -399,9 +399,17 @@ def main():
         dcp_content = re.sub(r",(\s*[\]}])", r"\1", dcp_content)
         dcp_config = json.loads(dcp_content)
     dcp_config["$schema"] = dcp_config.get("$schema", "https://raw.githubusercontent.com/Opencode-DCP/opencode-dynamic-context-pruning/master/dcp.schema.json")
-    compress = dcp_config.get("compress", {})
-    model_max_limits = compress.get("modelMaxLimits", {})
-    model_min_limits = compress.get("modelMinLimits", {})
+    
+    # Ensure compress structure exists
+    if "compress" not in dcp_config:
+        dcp_config["compress"] = {}
+    if "modelMaxLimits" not in dcp_config["compress"]:
+        dcp_config["compress"]["modelMaxLimits"] = {}
+    if "modelMinLimits" not in dcp_config["compress"]:
+        dcp_config["compress"]["modelMinLimits"] = {}
+    
+    model_max_limits = dcp_config["compress"]["modelMaxLimits"]
+    model_min_limits = dcp_config["compress"]["modelMinLimits"]
     for provider in new_providers:
         for model in provider["models"]:
             model_name = model["name"]
