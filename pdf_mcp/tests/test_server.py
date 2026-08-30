@@ -6,12 +6,17 @@ caching, page citations, and search/query behavior.
 
 from pathlib import Path
 
+import base64
+
 import pytest
 
 from pdf_mcp.cache import PDFCache
 from pdf_mcp.pdf_processor import PDFProcessor
 from pdf_mcp.server import (
+    fetch_formula,
+    pdf_formulas,
     pdf_get_page,
+    pdf_has_formula,
     pdf_metadata,
     pdf_query,
     pdf_register,
@@ -40,6 +45,16 @@ def text_pdf():
 def scanned_pdf():
     """Path to the scanned PDF (no text layer)."""
     return TEST_DATA / "paper_image.pdf"
+
+
+@pytest.fixture
+def radiative_pdf():
+    """Path to the two-column scientific paper with a partial text layer.
+
+    A 12-page paper on radiative transfer in plant leaves (Berdnik &
+    Mukhamedyarov) whose equations and symbols require selective OCR.
+    """
+    return TEST_DATA / "radiative_transfer_leaves.pdf"
 
 
 @pytest.fixture
@@ -274,6 +289,60 @@ class TestEdgeCases:
         result = await pdf_metadata("nonexistent_doc")
         assert result["success"] is False
         assert "not found" in result["error"].lower()
+
+
+class TestFormulaExtraction:
+    """Display-formula bbox detection, indexing and fetch (radiative paper).
+
+    The radiative-transfer paper is a dense two-column maths document whose
+    equations are a 2D arrangement of glyphs, so they are exposed as croppable
+    formula regions with their own numbers rather than relying on linear text.
+    """
+
+    @pytest.mark.asyncio
+    async def test_register_and_fetch_display_formulas(self, radiative_pdf):
+        result = await pdf_register(str(radiative_pdf))
+        assert result["success"] is True
+        doc_id = result["doc_id"]
+
+        # Document-level presence of display formulas.
+        has = await pdf_has_formula(doc_id)
+        assert has["success"] is True
+        assert has["has_formula"] is True
+        assert has["total"] > 0
+
+        # Specific formula by number.
+        by_number = await pdf_has_formula(doc_id, number=1)
+        assert by_number["has_formula"] is True
+        assert by_number["formula"]["page"] >= 1
+
+        # Per-page listing with bbox geometry.
+        page1 = await pdf_formulas(doc_id, page=1)
+        assert page1["success"] is True
+        assert page1["total"] > 0
+        first = page1["formulas"][0]
+        assert first["page"] == 1
+        assert len(first["bbox"]) == 4
+
+        # Fetching the first formula returns a decodable PNG crop.
+        fetched = await fetch_formula(doc_id, first["number"], transcribe=False)
+        assert fetched["success"] is True
+        assert fetched["page"] == 1
+        b64 = fetched["image_png_b64"]
+        assert b64[:8] == "iVBORw0K"  # PNG magic bytes
+        assert len(base64.b64decode(b64)) > 1000
+
+        # Unknown formula number is reported gracefully.
+        missing = await fetch_formula(doc_id, 99999)
+        assert missing["success"] is False
+        assert "not found" in missing["error"]
+
+    @pytest.mark.asyncio
+    async def test_formula_helpers_unknown_document(self):
+        # Unregistered document id is handled gracefully without processing.
+        assert (await pdf_has_formula("nonexistent_doc"))["success"] is False
+        assert (await pdf_formulas("nonexistent_doc"))["success"] is False
+        assert (await fetch_formula("nonexistent_doc", 1))["success"] is False
 
 
 if __name__ == "__main__":
