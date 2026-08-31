@@ -17,6 +17,8 @@ dependencies = [
     "pillow>=10.0.0",
     "pydantic>=2.0.0",
     "pdf2image>=1.16.0",
+    "pymupdf>=1.24.0",
+    "pix2tex>=0.1.2",
 ]
 
 [project.optional-dependencies]

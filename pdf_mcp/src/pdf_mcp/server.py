@@ -1,6 +1,7 @@
 """FastMCP server for PDF ingestion and analysis."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -179,6 +180,21 @@ async def pdf_register(
             "description": description,
             "created_at": asyncio.get_event_loop().time(),
         }
+
+        # Build a lookup index of display formulas across all pages. The cropped
+        # image is generated on demand (in fetch_formula) so registration stays
+        # cheap and cache-friendly; only geometry + linear text are indexed.
+        formulas_index: List[Dict[str, Any]] = []
+        for pc in page_contents:
+            for f in pc.diagnostics.get("formulas", []):
+                formulas_index.append({
+                    "doc_id": doc_id,
+                    "page": pc.page_number,
+                    "number": f["number"],
+                    "bbox": f["bbox"],
+                    "text": f.get("text", ""),
+                })
+        _registered_docs[doc_id]["formulas"] = formulas_index
 
         # Build response
         ocr_pages = [
@@ -607,6 +623,172 @@ async def pdf_get_page(
         "total_pages_returned": len(page_contents),
         "citation": _build_citation(doc_id, [p["page_number"] for p in page_contents]),
     }
+
+
+@mcp.tool()
+async def pdf_formulas(
+    doc_id: str,
+    page: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    List the display formulas detected in a registered document.
+
+    Each detected display equation is reported with a formula ``number`` (used
+    as the key for ``fetch_formula``), its ``page``, its axis-aligned ``bbox``
+    on the page, and a best-effort linear text from the PDF's native layer
+    (note: the 2D math structure is NOT reliably represented in this text -
+    fetch the cropped image for an accurate transcription).
+
+    Args:
+        doc_id: Document ID from pdf_register
+        page: Optional page number filter (1-based); list all pages if omitted
+
+    Returns:
+        List of formula records, plus a total count and the doc's page count.
+    """
+    doc = _registered_docs.get(doc_id)
+    if not doc:
+        return {"success": False, "error": f"Document not found: {doc_id}"}
+
+    formulas: List[Dict[str, Any]] = []
+    for f in doc.get("formulas", []):
+        if page is None or f["page"] == page:
+            formulas.append({
+                "doc_id": doc_id,
+                "page": f["page"],
+                "number": f["number"],
+                "bbox": f["bbox"],
+                "text": f.get("text", ""),
+            })
+
+    if not formulas:
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "total": 0,
+            "formulas": [],
+            "message": f"No display formulas found"
+                       + (f" on page {page}" if page else "") + ".",
+        }
+
+    return {
+        "success": True,
+        "doc_id": doc_id,
+        "total": len(formulas),
+        "total_in_doc": len(doc.get("formulas", [])),
+        "formulas": formulas,
+    }
+
+
+@mcp.tool()
+async def pdf_has_formula(
+    doc_id: str,
+    number: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Check whether a registered document contains display formulas.
+
+    Args:
+        doc_id: Document ID from pdf_register
+        number: If given, check that a specific formula (by number) exists;
+                otherwise check whether the document has any formulas at all.
+
+    Returns:
+        A boolean ``has_formula`` and, when a number was supplied and found,
+        that formula's record.
+    """
+    doc = _registered_docs.get(doc_id)
+    if not doc:
+        return {"success": False, "error": f"Document not found: {doc_id}"}
+
+    formulas = doc.get("formulas", [])
+    if number is not None:
+        match = next((f for f in formulas if f["number"] == number), None)
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "has_formula": match is not None,
+            "formula": ({
+                "page": match["page"],
+                "bbox": match["bbox"],
+                "text": match.get("text", ""),
+            } if match else None),
+        }
+
+    return {
+        "success": True,
+        "doc_id": doc_id,
+        "has_formula": len(formulas) > 0,
+        "total": len(formulas),
+    }
+
+
+@mcp.tool()
+async def fetch_formula(
+    doc_id: str,
+    number: int,
+    dpi: int = 300,
+    transcribe: bool = True,
+) -> Dict[str, Any]:
+    """
+    Fetch a detected display formula by number.
+
+    Crops the formula's region from the page into a high-resolution PNG image
+    (because the PDF's linear text cannot represent the 2D math structure) and
+    optionally transcribes it to LaTeX using pix2tex (LaTeX-OCR) when installed.
+
+    Args:
+        doc_id: Document ID from pdf_register
+        number: Formula number (from pdf_formulas / pdf_has_formula)
+        dpi: Render resolution for the crop (default 300)
+        transcribe: If True, attempt LaTeX transcription with pix2tex
+
+    Returns:
+        The formula's page, bbox, a base64-encoded PNG of the crop, the
+        original linear text, and (when available) the LaTeX transcription.
+    """
+    doc = _registered_docs.get(doc_id)
+    if not doc:
+        return {"success": False, "error": f"Document not found: {doc_id}"}
+
+    formula = next(
+        (f for f in doc.get("formulas", []) if f["number"] == number), None
+    )
+    if not formula:
+        return {
+            "success": False,
+            "error": f"Formula #{number} not found in {doc_id}",
+            "available": [f["number"] for f in doc.get("formulas", [])],
+        }
+
+    processor = get_processor()
+    image = processor.crop_formula_image(
+        Path(doc["file_path"]), formula["page"], formula["bbox"], dpi=dpi
+    )
+    if image is None:
+        return {
+            "success": False,
+            "error": f"Failed to render formula #{number} from the PDF",
+            "page": formula["page"],
+            "bbox": formula["bbox"],
+        }
+
+    result: Dict[str, Any] = {
+        "success": True,
+        "doc_id": doc_id,
+        "page": formula["page"],
+        "number": number,
+        "bbox": formula["bbox"],
+        "text": formula.get("text", ""),
+        "image_png_b64": base64.b64encode(image).decode("ascii"),
+        "image_format": "png",
+        "image_dpi": dpi,
+    }
+
+    if transcribe:
+        result["latex"] = processor.transcribe_formula_image(image)
+
+    return result
 
 
 @mcp.tool()

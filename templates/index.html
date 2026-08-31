@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>LaTeX Renderer</title>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+<style>
+body { font-family: sans-serif; max-width: 800px; margin: 40px auto; }
+textarea { width: 100%; height: 120px; font-family: monospace; }
+button { margin: 8px 4px; padding: 8px 12px; }
+#scale { width: 100%; }
+#preview { margin-top: 20px; border: 1px solid #ccc; padding: 10px; }
+.math-preview { font-size: 48px; }
+#renderPreview { margin-top: 20px; border: 1px solid #ddd; padding: 10px; background: #f9f9f9; }
+#renderPreview img { width: 150%; height: auto; max-width: none; }
+</style>
+</head>
+<body>
+<h1>LaTeX Renderer</h1>
+<textarea id="latex">\int_{\Omega} f_r(\omega_i, \omega_o) L_i(\omega_i) (\omega_i \cdot n) d\omega_i</textarea>
+<div>
+<label>PNG Scale: <span id="scaleVal">1</span></label><br>
+<input type="range" id="scale" min="1" max="4" step="0.1" value="1">
+</div>
+<div>
+<button id="updatePreview">Update Preview</button>
+<button id="savePdf">Save as PDF</button>
+<button id="copySvg">Copy as SVG</button>
+<button id="copySvgDark">Copy as SVG dark</button>
+<button id="copyPng">Copy as PNG</button>
+<button id="copyPngDark">Copy as PNG dark</button>
+</div>
+<div id="status"></div>
+<div id="mathPreview" class="math-preview"></div>
+<div id="renderPreview"></div>
+<script>
+const latexEl = document.getElementById('latex');
+const scaleEl = document.getElementById('scale');
+const scaleVal = document.getElementById('scaleVal');
+const status = document.getElementById('status');
+const mathPreview = document.getElementById('mathPreview');
+const renderPreview = document.getElementById('renderPreview');
+scaleEl.oninput = () => scaleVal.textContent = scaleEl.value;
+
+let cache = {latex:'', scale:0, data:null};
+let debounceTimer = null;
+
+function updateMathPreview() {
+  mathPreview.innerHTML = '\\(' + latexEl.value + '\\)';
+  MathJax.typesetPromise([mathPreview]);
+}
+
+latexEl.addEventListener('input', () => {
+  updateMathPreview();
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(async () => {
+    await getRenderData(false);
+  }, 1000);
+});
+updateMathPreview();
+
+async function render(latex, scale, invert=false, force=false) {
+  if (!force && !invert && cache.data && cache.latex===latex && cache.scale===scale) {
+    status.textContent = 'Using cached render';
+    return cache.data;
+  }
+  status.textContent = 'Rendering...';
+  const resp = await fetch('/api/render', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({latex, scale, invert})
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    status.textContent = 'Error: ' + err.error;
+    return null;
+  }
+  const data = await resp.json();
+  status.textContent = 'Rendered';
+  cache = {latex, scale, data};
+  // Show rendered preview
+  const svgImg = 'data:image/svg+xml;base64,' + data.svg;
+  renderPreview.innerHTML = '<img src="' + svgImg + '" alt="render preview">';
+  return data;
+}
+
+async function getRenderData(invert=false) {
+  const latex = latexEl.value;
+  const scale = parseFloat(scaleEl.value);
+  return await render(latex, scale, invert);
+}
+
+document.getElementById('updatePreview').onclick = async () => {
+  await getRenderData();
+};
+
+document.getElementById('savePdf').onclick = async () => {
+  const data = await getRenderData();
+  if (!data) return;
+  const blob = base64ToBlob(data.pdf, 'application/pdf');
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'equation.pdf';
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+document.getElementById('copySvg').onclick = async () => {
+  const data = await getRenderData(false);
+  if (!data) return;
+  const svgText = atob(data.svg);
+  try {
+    await navigator.clipboard.writeText(svgText);
+    status.textContent = 'SVG copied to clipboard';
+  } catch(e) {
+    status.textContent = 'Copy failed: ' + e;
+  }
+};
+
+document.getElementById('copySvgDark').onclick = async () => {
+  const data = await getRenderData(true);
+  if (!data) return;
+  const svgText = atob(data.svg);
+  try {
+    await navigator.clipboard.writeText(svgText);
+    status.textContent = 'SVG dark copied to clipboard';
+  } catch(e) {
+    status.textContent = 'Copy failed: ' + e;
+  }
+};
+
+document.getElementById('copyPng').onclick = async () => {
+  const data = await getRenderData(false);
+  if (!data) return;
+  const pngDataUrl = 'data:image/png;base64,' + data.png;
+  const img = new Image();
+  img.src = pngDataUrl;
+  await img.decode();
+  const canvas = new OffscreenCanvas(img.width, img.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const blob = await canvas.convertToBlob({type: 'image/png'});
+  await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+  status.textContent = 'PNG copied to clipboard';
+};
+
+document.getElementById('copyPngDark').onclick = async () => {
+  const data = await getRenderData(true);
+  if (!data) return;
+  const pngDataUrl = 'data:image/png;base64,' + data.png;
+  const img = new Image();
+  img.src = pngDataUrl;
+  await img.decode();
+  const canvas = new OffscreenCanvas(img.width, img.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const blob = await canvas.convertToBlob({type: 'image/png'});
+  await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+  status.textContent = 'PNG dark copied to clipboard';
+};
+
+function base64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr], {type: mime});
+}
+</script>
+</body>
+</html>
