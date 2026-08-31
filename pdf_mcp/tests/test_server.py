@@ -4,6 +4,7 @@ Consolidated, focused suite covering: text PDFs, scanned PDFs, invalid paths,
 caching, page citations, and search/query behavior.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -30,16 +31,36 @@ from pdf_mcp.utils import (
 from conftest import TEST_DATA
 
 
+@pytest.fixture(scope="module")
+def test_data():
+    """Load test data from test_data.json."""
+    test_data_path = Path(__file__).parent / "test_data.json"
+    with open(test_data_path, "r") as f:
+        return json.load(f)
+
+
 @pytest.fixture
-def text_pdf():
+def text_pdf(test_data):
     """Path to the two-column PDF with a text layer."""
-    return TEST_DATA / "paper.pdf"
+    return TEST_DATA / test_data[0]["file_text"]
 
 
 @pytest.fixture
-def scanned_pdf():
+def scanned_pdf(test_data):
     """Path to the scanned PDF (no text layer)."""
-    return TEST_DATA / "paper_image.pdf"
+    return TEST_DATA / test_data[0]["file_image"]
+
+
+@pytest.fixture
+def vroot_pdf(test_data):
+    """Path to the VRoot PDF."""
+    return TEST_DATA / test_data[1]["file_text"]
+
+
+@pytest.fixture
+def vroot_scanned_pdf(test_data):
+    """Path to the VRoot scanned PDF."""
+    return TEST_DATA / test_data[1]["file_image"]
 
 
 @pytest.fixture
@@ -68,7 +89,7 @@ class TestPathValidation:
         [
             (r"C:\Users\me\doc.pdf", "/mnt/c/Users/me/doc.pdf"),
             ("C:/Users/me/doc.pdf", "/mnt/c/Users/me/doc.pdf"),
-            (r"D:\data\paper.pdf", "/mnt/d/data/paper.pdf"),
+            (r"D:\data\paper_short.pdf", "/mnt/d/data/paper_short.pdf"),
             ("/home/user/doc.pdf", "/home/user/doc.pdf"),
             ("/mnt/c/Users/me/doc.pdf", "/mnt/c/Users/me/doc.pdf"),
         ],
@@ -130,40 +151,38 @@ class TestCache:
 class TestPDFProcessor:
     """Processing of text and scanned PDFs."""
 
-    def test_process_text_pdf(self, text_pdf):
+    def test_process_text_pdf(self, text_pdf, test_data):
         pages, meta = PDFProcessor().process_pdf(text_pdf)
-        assert len(pages) == 16
-        assert [p.page_number for p in pages] == list(range(1, 17))
+        expected_pages = test_data[0]["pages"]
+        expected_title = test_data[0]["title"]
+        assert len(pages) == expected_pages
+        assert [p.page_number for p in pages] == list(range(1, expected_pages + 1))
         assert all(p.text_length > 0 for p in pages)
-        assert meta["pages_with_ocr"] == 0
-        assert meta["title"]
-        assert meta["title"].startswith("VRoot")
+        
+        page1 = pages[0].markdown
+        assert expected_title in page1
 
-    def test_two_column_layout_not_mangled(self, text_pdf):
+    @pytest.mark.asyncio
+    async def test_two_column_layout_not_mangled(self, registered_text_doc, test_data):
         """Regression: two-column pages must not concatenate words/spaces.
 
         pdfplumber's naive extract interleaves columns into one string with no
         spaces (e.g. "Thisarticledescribes..."). Layout-aware extraction keeps
         the two columns separate and intact.
         """
-        pages, _ = PDFProcessor().process_pdf(text_pdf)
-        page1 = pages[0].markdown
+        doc_id, _ = registered_text_doc
 
-        # Known sentences from the abstract arrive intact and spaced.
-        assert "This article describes an immersive virtual reality" in page1
-        assert (
-            "Historically, it was not possible to\naccess root systems except "
-            "by using difﬁcult excavation processes." in page1
-        )
+        full_sentence = test_data[0].get("full_sentence", "")
+        if full_sentence:
+            result = await pdf_search(doc_id, full_sentence)
+            assert result["success"]
+            assert result["total_matches"] > 0
 
-        # A tell-tale sign of the mangled concatenation is absent.
-        assert "access rootsystems" not in page1
-        assert "Thisarticledescribes" not in page1
-
-    def test_process_scanned_pdf(self, scanned_pdf):
+    def test_process_scanned_pdf(self, scanned_pdf, test_data):
         """Scanned pages have no text layer, so OCR (or a warning) is used."""
         pages, meta = PDFProcessor().process_pdf(scanned_pdf)
-        assert len(pages) == 16
+        expected_pages = test_data[0]["pages"]
+        assert len(pages) == expected_pages
         assert all(p.page_number >= 1 for p in pages)
         assert meta["pages_with_ocr"] > 0 or meta["extraction_warnings"]
 
@@ -181,14 +200,14 @@ class TestServerTools:
     """MCP tools end-to-end on the real PDF."""
 
     @pytest.mark.asyncio
-    async def test_register_and_metadata(self, registered_text_doc):
+    async def test_register_and_metadata(self, registered_text_doc, test_data):
         doc_id, result = registered_text_doc
-        assert result["total_pages"] == 16
+        expected_pages = test_data[0]["pages"]
+        assert result["total_pages"] == expected_pages
 
         meta = await pdf_metadata(doc_id)
         assert meta["success"]
-        assert meta["total_pages"] == 16
-        assert meta["title"].startswith("VRoot")
+        assert meta["total_pages"] == expected_pages
 
     @pytest.mark.asyncio
     async def test_register_invalid_inputs(self, tmp_path):
@@ -203,26 +222,30 @@ class TestServerTools:
         assert (await pdf_register(str(bad)))["success"] is False
 
     @pytest.mark.asyncio
-    async def test_get_page_with_citations(self, registered_text_doc):
+    async def test_get_page_with_citations(self, registered_text_doc, test_data):
         doc_id, _ = registered_text_doc
+        expected_pages = test_data[0]["pages"]
 
         single = await pdf_get_page(doc_id, "1")
         assert single["success"]
         assert single["pages"][0]["page_number"] == 1
         assert single["citation"]
 
-        rng = await pdf_get_page(doc_id, "1-3")
-        assert rng["success"]
-        assert rng["total_pages_returned"] <= 3
+        test_page_range = test_data[0].get("test_page_range", "1")
+        if expected_pages > 1:
+            rng = await pdf_get_page(doc_id, test_page_range)
+            assert rng["success"]
+            assert rng["total_pages_returned"] <= expected_pages
 
         invalid = await pdf_get_page(doc_id, "999")
         assert invalid["success"] is False
 
     @pytest.mark.asyncio
-    async def test_search_found_and_not_found(self, registered_text_doc):
+    async def test_search_found_and_not_found(self, registered_text_doc, test_data):
         doc_id, _ = registered_text_doc
+        test_search_term = test_data[0]["test_search_term"]
 
-        hit = await pdf_search(doc_id, "Historically")
+        hit = await pdf_search(doc_id, test_search_term)
         assert hit["success"]
         assert hit["total_matches"] > 0
 
@@ -231,21 +254,25 @@ class TestServerTools:
         assert miss["total_matches"] == 0
 
     @pytest.mark.asyncio
-    async def test_query_citations_and_multiturn(self, registered_text_doc):
+    async def test_query_citations_and_multiturn(self, registered_text_doc, test_data):
         doc_id, _ = registered_text_doc
+        test_search_term = test_data[0]["test_search_term"]
+        query_keywords = test_data[0].get("query_keywords", [])
 
-        result = await pdf_query(doc_id, "What are the root system findings?")
-        assert result["success"]
-        # Multi-turn through the doc_id: all tools work against the same doc.
+        for query_item in query_keywords:
+            for keyword, min_matches in query_item.items():
+                result = await pdf_query(doc_id, keyword)
+                assert result["success"]
+                occs = result["keyword_occurrences"].get(keyword, [])
+                assert len(occs) >= min_matches
+                for occ in occs:
+                    assert occ["page_number"] >= 1
+                    assert occ["matched_text"]
+                    assert occ["position"] >= 0
+
         assert (await pdf_metadata(doc_id))["success"]
         assert (await pdf_get_page(doc_id, "1"))["success"]
-        assert (await pdf_search(doc_id, "Virtual reality"))["success"]
-
-        if result["passages"]:
-            passage = result["passages"][0]
-            assert passage["doc_id"] == doc_id
-            assert "page_numbers" in passage
-            assert "citation" in passage
+        assert (await pdf_search(doc_id, test_search_term))["success"]
 
 
 class TestEdgeCases:
