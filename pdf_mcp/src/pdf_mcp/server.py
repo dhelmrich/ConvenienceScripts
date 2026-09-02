@@ -15,7 +15,14 @@ from fastmcp import FastMCP
 
 from .cache import PDFCache
 from .models import DocumentPassage, PageContent, PDFMetadata, SearchHit
-from .pdf_processor import PDFProcessor, PDFProcessorError
+from .pdf_processor import (
+    PDFProcessor,
+    PDFProcessorError,
+    extract_figures_from_pdf,
+    pdf_bbox_to_image_bbox,
+    guided_seek_single_box,
+    GuidedSeekCancelledError,
+)
 from .utils import (
     MAX_PDF_SIZE,
     PDFValidationError,
@@ -195,6 +202,20 @@ async def pdf_register(
                     "text": f.get("text", ""),
                 })
         _registered_docs[doc_id]["formulas"] = formulas_index
+
+        # Build a lookup index of figures across all pages.
+        figures_index: List[Dict[str, Any]] = []
+        for pc in page_contents:
+            for f in pc.diagnostics.get("figures", []):
+                figures_index.append({
+                    "doc_id": doc_id,
+                    "page": pc.page_number,
+                    "number": f["number"],
+                    "bbox": f["bbox"],
+                    "caption": f.get("caption", ""),
+                    "has_image": f.get("has_image", False),
+                })
+        _registered_docs[doc_id]["figures"] = figures_index
 
         # Build response
         ocr_pages = [
@@ -789,6 +810,256 @@ async def fetch_formula(
         result["latex"] = processor.transcribe_formula_image(image)
 
     return result
+
+
+@mcp.tool()
+async def pdf_figures(
+    doc_id: str,
+    page: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    List the figure/diagram regions detected in a registered document.
+
+    Each detected figure is reported with a figure ``number`` (used as the key
+    for ``fetch_figure``), its ``page``, its axis-aligned ``bbox`` on the page,
+    an optional ``caption`` if detected, and a ``has_image`` flag indicating
+    whether the figure contains embedded image data.
+
+    Args:
+        doc_id: Document ID from pdf_register
+        page: Optional page number filter (1-based); list all pages if omitted
+
+    Returns:
+        List of figure records, plus a total count and the doc's page count.
+    """
+    doc = _registered_docs.get(doc_id)
+    if not doc:
+        return {"success": False, "error": f"Document not found: {doc_id}"}
+
+    figures: List[Dict[str, Any]] = []
+    for f in doc.get("figures", []):
+        if page is None or f["page"] == page:
+            figures.append({
+                "doc_id": doc_id,
+                "page": f["page"],
+                "number": f["number"],
+                "bbox": f["bbox"],
+                "caption": f.get("caption", ""),
+                "has_image": f.get("has_image", False),
+            })
+
+    if not figures:
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "total": 0,
+            "figures": [],
+            "message": f"No figures found"
+                       + (f" on page {page}" if page else "") + ".",
+        }
+
+    return {
+        "success": True,
+        "doc_id": doc_id,
+        "total": len(figures),
+        "total_in_doc": len(doc.get("figures", [])),
+        "figures": figures,
+    }
+
+
+@mcp.tool()
+async def fetch_figure(
+    doc_id: str,
+    number: int,
+    dpi: int = 300,
+) -> Dict[str, Any]:
+    """
+    Fetch a detected figure by number.
+
+    Crops the figure's region from the page into a high-resolution PNG image.
+    Returns the image along with any detected caption.
+
+    Args:
+        doc_id: Document ID from pdf_register
+        number: Figure number (from pdf_figures)
+        dpi: Render resolution for the crop (default 300)
+
+    Returns:
+        The figure's page, bbox, a base64-encoded PNG of the crop,
+        the caption (if detected), and image metadata.
+    """
+    doc = _registered_docs.get(doc_id)
+    if not doc:
+        return {"success": False, "error": f"Document not found: {doc_id}"}
+
+    figure = next(
+        (f for f in doc.get("figures", []) if f["number"] == number), None
+    )
+    if not figure:
+        return {
+            "success": False,
+            "error": f"Figure #{number} not found in {doc_id}",
+            "available": [f["number"] for f in doc.get("figures", [])],
+        }
+
+    processor = get_processor()
+    image = processor.crop_page_image(
+        Path(doc["file_path"]), figure["page"], figure["bbox"], dpi=dpi
+    )
+    if image is None:
+        return {
+            "success": False,
+            "error": f"Failed to render figure #{number} from the PDF",
+            "page": figure["page"],
+            "bbox": figure["bbox"],
+        }
+
+    return {
+        "success": True,
+        "doc_id": doc_id,
+        "page": figure["page"],
+        "number": number,
+        "bbox": figure["bbox"],
+        "caption": figure.get("caption", ""),
+        "image_png_b64": base64.b64encode(image).decode("ascii"),
+        "image_format": "png",
+        "image_dpi": dpi,
+        "has_image": figure.get("has_image", False),
+    }
+
+
+@mcp.tool()
+async def extract_figures_from_pdf(
+    pdf_path: str,
+) -> Dict[str, Any]:
+    """
+    Extract figure regions from a PDF using STRUCTURAL CUES ONLY.
+
+    This is a **structure-first** detection tool that intentionally underdetects
+    figures. It relies on:
+    - Embedded image XObjects
+    - Marked-content sequences tagged as /Figure (when available)
+
+    It does NOT use:
+    - Caption text or regex patterns
+    - OCR
+    - Layout models
+    - Non-text region inference
+
+    Missing figures are expected to be recovered via user-assisted refinement
+    (e.g., a guided_seek tool that lets users draw bounding boxes).
+
+    Args:
+        pdf_path: Path to the PDF file
+
+    Returns:
+        Dict with:
+        - success: bool
+        - figures: list of figure dicts, each with:
+          - page: 1-based page number
+          - bbox_pdf: [x0, y0, x1, y1] in PDF points (origin at bottom-left)
+          - origin: "image_xobject" | "marked_content_figure"
+          - source_pdf: absolute path to the PDF
+        - message: status message
+    """
+    try:
+        validated_path = validate_file_path(pdf_path, "PDF file")
+        validate_pdf_file(validated_path)
+
+        figures = extract_figures_from_pdf(str(validated_path))
+
+        return {
+            "success": True,
+            "figures": figures,
+            "total": len(figures),
+            "message": f"Extracted {len(figures)} figure candidates from {len(set(f['page'] for f in figures))} pages",
+        }
+
+    except PDFValidationError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"Figure extraction failed: {e}", exc_info=True)
+        return {"success": False, "error": f"Extraction failed: {e}"}
+
+
+@mcp.tool()
+def guided_seek_single_box(
+    pdf_path: str,
+    page_number: int,
+    instruction: Optional[str] = None,
+    dpi: int = 150,
+) -> Dict[str, Any]:
+    """
+    Open a PDF page in a GUI window and let the user draw a single bounding box.
+    
+    This is a **vision-native** tool for user-assisted figure/region selection.
+    The user sees the rendered PDF page and draws a rectangle around the region
+    they want the model to inspect. The tool returns the cropped region as a PNG
+    image, which the vision-capable LLM can then analyze.
+
+    Use this when:
+    - `extract_figures_from_pdf` missed a figure and you want to recover it
+    - You need to inspect a specific region that automated detection didn't find
+    - You want to manually select a table, figure, or other visual element
+
+    The tool:
+    1. Renders the specified page at the given DPI
+    2. Opens a window showing the page
+    3. Lets the user draw one rectangle
+    4. Returns the cropped image along with PDF and image coordinates
+
+    Args:
+        pdf_path: Path to the PDF file
+        page_number: 1-based page number to display
+        instruction: Optional instruction shown to the user (default: generic instruction)
+        dpi: Rendering resolution (default: 150)
+
+    Returns:
+        Dict with:
+        - success: bool
+        - page: int (1-based page number)
+        - bbox_pdf: [x0, y0, x1, y1] in PDF points (bottom-left origin)
+        - bbox_image: [x0, y0, x1, y1] in image pixels (top-left origin)
+        - crop_image_png: base64-encoded PNG of the cropped region
+        - full_page_image_png: base64-encoded PNG of the full page (for context)
+        - instruction: str (the instruction shown to the user)
+        - error: str (if success is False)
+    """
+    try:
+        validated_path = validate_file_path(pdf_path, "PDF file")
+        validate_pdf_file(validated_path)
+
+        result = guided_seek_single_box(
+            str(validated_path),
+            page_number=page_number,
+            instruction=instruction,
+            dpi=dpi,
+        )
+
+        # Encode images as base64 for transport
+        import base64
+        return {
+            "success": True,
+            "page": result["page"],
+            "bbox_pdf": result["bbox_pdf"],
+            "bbox_image": result["bbox_image"],
+            "crop_image_png": base64.b64encode(result["crop_image"]).decode("ascii"),
+            "full_page_image_png": base64.b64encode(result["full_page_image"]).decode("ascii"),
+            "instruction": result["instruction"],
+            "dpi": result["dpi"],
+        }
+
+    except GuidedSeekCancelledError as e:
+        return {
+            "success": False,
+            "error": "User cancelled the box selection",
+            "cancelled": True,
+        }
+    except PDFValidationError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.exception(f"guided_seek_single_box failed: {e}")
+        return {"success": False, "error": f"Internal error: {str(e)}"}
 
 
 @mcp.tool()
