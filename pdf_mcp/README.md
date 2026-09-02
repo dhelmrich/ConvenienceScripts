@@ -1,48 +1,68 @@
 # PDF MCP Server
 
-A FastMCP server for robust PDF ingestion and analysis with OCR fallback.
+A FastMCP server for robust PDF ingestion, analysis, and retrieval, with a
+**region-aware two-column extractor** (PyMuPDF) plus **selective OCR** and an
+optional **LLM (alias-fast/Blablador) word-separation fallback**.
+
+The server only reads local PDFs; it has no write component.
 
 ## Features
 
-- **MarkItDown PDF-to-Markdown conversion** - Preserves headings, tables, lists, and structure
-- **Tesseract OCR fallback** - Automatically detects and processes scanned pages
-- **Content-hash caching** - Fast repeated access to processed documents
-- **Page-cited passages** - Bounded responses with clear citations
-- **Multi-turn document analysis** - Register once, query many times
+- **PyMuPDF extraction** — primary text layer extraction with per-character
+  origins (`rawdict`) and word geometry.
+- **Region-aware multi-column handling** — an adaptive body-band + gutter
+  detector keeps two-column academic papers correctly ordered instead of
+  interleaving columns into a mangled string.
+- **Boilerplate filtering** — running headers, vertical watermarks, and
+  full-width contiguous footers are filtered per page.
+- **Per-line spacing classifier** — each body line is classified as
+  *trusted_native*, *geometry_candidate*, or *ocr_or_llm_required*.
+- **Selective OCR** — only ambiguous lines (or low-density / scanned pages)
+  are routed to Tesseract OCR.
+- **LLM word-separation fallback** — concatenated words (missing spaces in the
+  text layer, e.g. `associatingeachpixel...`) are repaired via alias-fast
+  (Blablador) when `BLABLADOR_TOKEN` is set. LLM fixes take priority over OCR.
+- **Content-hash caching** — fast repeated access to processed documents.
+- **Page-cited passages** — bounded responses with clear citations.
+- **Whitespace-insensitive search/query** — matches text regardless of
+  intermediate whitespace (spaces, tabs, newlines).
 
-This server only reads local PDFs; it has no write component.
+## How extraction works
 
-## Extraction Details
+The primary extractor is **PyMuPDF** (not pdfminer/MarkItDown). Each page goes
+through:
 
-### Page segmentation and multi-column layouts
-Page boundaries are determined authoritatively per page, and page number is
-preserved so every returned passage carries an accurate citation. Text is
-extracted with **pdfminer layout analysis** (`pdfminer.high_level.extract_pages`),
-which performs layout segmentation and therefore keeps **two-column** and other
-multi-column PDFs (typical of academic papers) correctly ordered — each column's
-text stays intact with proper spacing, rather than being interleaved into one
-mangled string. This is the same engine MarkItDown's PDF converter relies on for
-text-based PDFs.
+1. **Segmentation** (`page_segment_regions`): an adaptive body-band + gutter
+   detector locates the two-column body and its gutter x. Full-width front
+   matter (title/abstract), headers, watermarks, and footers are separated.
+2. **Per-line classification** (`classify_line_spacing`): every rawdict body
+   line is inspected for explicit spaces and inter-glyph gap patterns. Lines
+   with spaces are *trusted native*; justified lines with a separable bimodal
+   gap histogram are candidates for gap reconstruction; lines with no spaces
+   are flagged *ocr_or_llm_required*.
+3. **Concatenated-word repair**: lines with no spaces and length > 20 chars are
+   sent to alias-fast (Blablador) to re-insert spaces. The LLM result is kept
+   and OCR is **not** run on those lines (preventing OCR from overwriting the
+   LLM fix).
+4. **Selective OCR**: remaining ambiguous lines are OCR'd via Tesseract.
+5. **Cross-column QA gate**: native order is compared against geometric
+   (y, x) order; if they disagree on a cross-column sentence, left-then-right
+   reconstruction is used.
 
-### OCR fallback for scanned pages
-Pages whose extracted text is below a threshold (e.g. scanned pages with no text
-layer) are rendered with `pdf2image` and passed to Tesseract OCR. The OCR text is
-preserved in the page content so search/query work on scanned documents too. Each
-OCRed page carries a confidence score and an extraction warning.
-
-### Known limitation
-Very uncommon glyphs (e.g. characters absent from the embedded font mapping) may
-appear as `(cid:N)` sequences from pdfminer. This affects only a handful of
-special characters in author names/titles, not the body text.
+### Font ligature handling
+Characters are read in the order PyMuPDF reports them (not re-sorted purely by
+x-position), so font ligatures that place glyphs at overlapping x-coordinates
+(e.g. `ft` rendered such that the `f` and `t` share an origin) are preserved in
+the correct reading order.
 
 ## Installation
 
 ```bash
-# Install the package
+# Install the package (editable)
 pip install -e .
 
 # Or install dependencies directly
-pip install fastmcp markitdown[all] pytesseract pillow pydantic pdf2image pytest pytest-asyncio
+pip install fastmcp pymupdf pytesseract pillow pydantic requests pytest pytest-asyncio
 ```
 
 ## System Dependencies
@@ -52,31 +72,27 @@ pip install fastmcp markitdown[all] pytesseract pillow pydantic pdf2image pytest
 #### Linux (Ubuntu/Debian)
 ```bash
 sudo apt-get update
-sudo apt-get install tesseract-ocr tesseract-ocr-eng poppler-utils
+sudo apt-get install tesseract-ocr tesseract-ocr-eng
 ```
 
 #### Linux (Fedora/RHEL)
 ```bash
-sudo dnf install tesseract tesseract-langpack-eng poppler-utils
+sudo dnf install tesseract tesseract-langpack-eng
 ```
 
 #### macOS
 ```bash
-brew install tesseract poppler
+brew install tesseract
 ```
 
 #### Windows
-1. Download and install Tesseract from: https://github.com/UB-Mannheim/tesseract/wiki
-   - Choose your language packs during installation
-2. Download Poppler from: https://github.com/oschwartz10612/poppler-windows/releases
-3. Add both to your PATH:
-   - Tesseract: `C:\Program Files\Tesseract-OCR`
-   - Poppler: `C:\path\to\poppler\bin`
+Download and install Tesseract from:
+https://github.com/UB-Mannheim/tesseract/wiki (choose your language packs during
+installation).
 
 ### Verify Installation
 ```bash
 tesseract --version
-pdfinfo --version  # From poppler-utils
 ```
 
 ## Configuration
@@ -87,12 +103,14 @@ pdfinfo --version  # From poppler-utils
 |----------|-------------|---------|
 | `PDF_MCP_CACHE_DIR` | Cache directory for processed documents | `~/.cache/pdf_mcp` |
 | `TESSERACT_PATH` | Path to tesseract executable | Auto-detected |
+| `BLABLADOR_TOKEN` | Token for alias-fast (Blablador) LLM calls | unset (disabled) |
+| `BLABLADOR_ADVISORY` | `1` enables the advisory layout cross-check | unset |
+| `BLABLADOR_MODEL` | Model alias for Blablador calls | `alias-fast` |
+| `BLABLADOR_API_URL` | Blablador API base URL | `https://api.helmholtz-blablador.fz-juelich.de/v1/chat/completions` |
 
-### Example Configuration
-```bash
-export PDF_MCP_CACHE_DIR="$HOME/.cache/pdf_mcp"
-export TESSERACT_PATH="/usr/bin/tesseract"
-```
+> **Note:** the LLM word-separation fallback and layout analysis are only active
+> when `BLABLADOR_TOKEN` is set. Without it, concatenated-word lines fall back
+> to OCR instead.
 
 ## Usage
 
@@ -122,47 +140,44 @@ fastmcp run src/pdf_mcp/server.py:mcp
 python -m pdf_mcp.server --transport http --host 0.0.0.0 --port 8560
 ```
 
-Endpoint: `http://<host>:<port>/mcp` at the given host and port.
-`--host 0.0.0.0` makes the server reachable from other machines, e.g. the
-Windows host when the server runs inside WSL.
+Endpoint: `http://<host>:<port>/mcp`.
+`--host 0.0.0.0` makes the server reachable from other machines (e.g. the
+Windows host when the server runs inside WSL).
 
 ### Running in WSL, using from Windows
 
-Because this server needs Tesseract/poppler (available only inside WSL), run it
-in WSL and let the Windows-host Jan client reach it over HTTP. To find the WSL
-IP, run inside WSL:
+Because this server needs Tesseract (available only inside WSL), run it in WSL
+and let the Windows-host client reach it over HTTP. To find the WSL IP:
 
 ```bash
 hostname -I     # e.g. 172.21.101.128
 ```
 
-**Important — default WSL2 (NAT mode):** that IP (e.g. `172.21.101.128`) is a
-WSL2 NAT address and is **not directly reachable from Windows**. Two working
-options:
+**Important — default WSL2 (NAT mode):** that IP is a NAT address and is
+**not directly reachable from Windows**. Two working options:
 
 **Option A — port proxy through Windows (recommended for NAT):**
-Forward a Windows localhost port to the WSL server so Windows connects to its
-own localhost. From an elevated Windows terminal:
+Forward a Windows localhost port to the WSL server. From an elevated Windows
+terminal:
 
 ```bat
 netsh interface portproxy add v4tov4 listenport=8560 listenaddress=127.0.0.1 connectport=8560 connectaddress=172.21.101.128
 ```
 
-Then in Windows Jan, connect to `http://127.0.0.1:8560/mcp`.
-This proxy rule lasts only until Windows reboots (re-run after restart).
+Then connect to `http://127.0.0.1:8560/mcp` from Windows. This rule lasts only
+until Windows reboots.
 
 **Option B — mirrored networking (WSL ≥ 2.0):**
 If `%USERPROFILE%\.wslconfig` contains `networkingMode=mirrored`, WSL shares the
-Windows host's own IP, so Windows can reach the server directly at the host's LAN
-IP via `http://<windows-lan-ip>:8560/mcp` with no proxy.
+Windows host IP, so Windows can reach the server directly at the host LAN IP with
+no proxy.
 
-> The `ifconfig` value `172.21.101.128` with a `netmask 255.255.240.0` is a NAT
-> address — use **Option A** unless you have switched to mirrored networking.
+## MCP Tools
 
-### MCP Tools
-
-#### `pdf_register(file_path, description?)`
-Register a PDF document for analysis.
+### `pdf_register(file_path, description?)`
+Register a PDF document for analysis. Validates the path, computes a content
+hash, and processes the PDF (with layout detection). Returns a `doc_id` for
+subsequent calls.
 
 ```json
 {
@@ -174,281 +189,197 @@ Register a PDF document for analysis.
 }
 ```
 
-Returns: `doc_id`, `total_pages`, `pages_with_ocr`, `warnings`
+Returns: `success`, `doc_id`, `total_pages`, `pages_with_ocr`,
+`ocr_page_numbers`, `layout`, `sample_text`, `warnings`.
 
-**Multi-column layout detection:**
-If the PDF has a multi-column layout, the response includes:
-- `layout`: Layout analysis (column count, layout type)
-- `sample_text`: First 1000 chars from page 1
-- `layout_guidance`: Suggests using `pdf_detect_layout` with sample text
+### `pdf_metadata(doc_id)`
+Get document metadata (page count, title, author, OCR pages, warnings).
 
-#### `pdf_detect_layout(doc_id?, file_path?, verify_sentence?, use_alias_fast?)`
-Detect the layout structure of a PDF document with **deterministic sentence verification** and optional LLM analysis.
+```json
+{ "name": "pdf_metadata", "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8" } }
+```
 
-**Deterministic Verification:**
-Provide a `verify_sentence` (a sentence you expect to appear consecutively in the text). The server checks the RAW PDF text extraction to determine:
-- `found`: Does the exact sentence appear?
-- `fragmented`: Are sentence fragments found but out of order?
-- `raw_text_sample`: First 500 chars of raw extraction for inspection
+### `pdf_extract_figures(pdf_path)`
+Extract figure regions from a PDF using **structural cues only**. This tool
+intentionally underdetects figures, relying on:
+- Embedded image XObjects
+- Marked-content sequences tagged as `/Figure`
 
-**LLM Analysis:**
-When `use_alias_fast=true` and `BLABLADOR_TOKEN` is set, the server calls alias-fast with the FULL raw page 1 text (up to 8000 chars) to get LLM-based layout reasoning.
+It does NOT use captions, OCR, or layout models. Missing figures are expected
+to be recovered via user-assisted refinement (e.g., `guided_seek_single_box`).
 
 ```json
 {
-  "name": "pdf_detect_layout",
+  "name": "pdf_extract_figures",
+  "arguments": { "pdf_path": "file:///home/user/documents/report.pdf" }
+}
+```
+
+Returns: `success`, `figures` (list with page, bbox_pdf, origin, source_pdf),
+`total`, `message`.
+
+### `guided_seek_single_box(pdf_path, page_number, instruction?, dpi?)`
+Open a PDF page in a GUI window and let the user draw a **single bounding box**.
+This is a **vision-native** tool for user-assisted figure/region selection. The
+user sees the rendered PDF page and draws a rectangle around the region they
+want the model to inspect. The tool returns the cropped region as a PNG image,
+which the vision-capable LLM can then analyze.
+
+**Use this when:**
+- `pdf_extract_figures` missed a figure and you want to recover it
+- You need to inspect a specific region that automated detection didn't find
+- You want to manually select a table, figure, or other visual element
+
+**The tool:**
+1. Renders the specified page at the given DPI (default: 150)
+2. Opens a window showing the page
+3. Lets the user draw one rectangle
+4. Returns the cropped image along with PDF and image coordinates
+
+```json
+{
+  "name": "guided_seek_single_box",
   "arguments": {
-    "doc_id": "pdf_a1b2c3d4e5f6g7h8",
-    "verify_sentence": "Ideally, non-destructive observations of RSAs...",
-    "use_alias_fast": true
+    "pdf_path": "file:///home/user/documents/report.pdf",
+    "page_number": 3,
+    "instruction": "Draw a rectangle around the figure you want the model to inspect.",
+    "dpi": 150
   }
 }
 ```
 
-**Response includes:**
-- `layout_type`: "single_column", "two_column", or "multi_column"
-- `columns`: Number of detected columns (programmatic)
-- `sentence_verification`: If verify_sentence provided:
-  - `found`: boolean - exact sentence in text
-  - `fragmented`: boolean - fragments found but broken
-  - `raw_text_sample`: Raw extraction for inspection
-- `llm_estimated_columns`: LLM column estimate
-- `llm_layout_mode`: LLM layout mode ("two_column_flow", etc.)
-- `llm_fragmentation_risk`: "low", "medium", or "high"
-- `llm_reasoning`: Detailed LLM analysis of text patterns
+Returns: `success`, `page`, `bbox_pdf` (PDF points, bottom-left origin),
+`bbox_image` (pixels, top-left origin), `crop_image_png` (base64),
+`full_page_image_png` (base64, for context), `instruction`, `dpi`.
+If cancelled by the user, returns `success: false` with `cancelled: true`.
 
-**Example Workflow:**
-1. Register PDF → get `sample_text` and layout warning
-2. Call `pdf_detect_layout` with `verify_sentence` (a sentence spanning columns)
-3. If `found=false` and `fragmented=true`, text extraction has column ordering issues
-4. Review `llm_reasoning` for explanation and `recommended_extraction` mode
+**Requirements:** This tool requires a GUI environment (tkinter). It will fail
+in headless environments.
 
-#### `pdf_metadata(doc_id)`
-Get document metadata.
-
-```json
-{
-  "name": "pdf_metadata",
-  "arguments": {
-    "doc_id": "pdf_a1b2c3d4e5f6g7h8"
-  }
-}
-```
-
-#### `pdf_get_page(doc_id, page_numbers, include_markdown?, max_length?)`
-Get content from specific pages.
+### `pdf_get_page(doc_id, page_numbers, include_markdown?, max_length?)`
+Get content from specific pages or ranges. Returns per-page content with a
+citation string.
 
 ```json
 {
   "name": "pdf_get_page",
-  "arguments": {
-    "doc_id": "pdf_a1b2c3d4e5f6g7h8",
-    "page_numbers": "1-5"
-  }
+  "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8", "page_numbers": "1-5" }
 }
 ```
 
-#### `pdf_search(doc_id, query, page_numbers?, max_results?, context_chars?)`
-Search for text within a document.
+### `pdf_search(doc_id, query, page_numbers?, max_results?, context_chars?)`
+Search for text within a document. **Whitespace-insensitive**: the query is
+matched regardless of spaces/tabs/newlines between words. Returns matches with
+page, position, snippet, and context.
 
 ```json
 {
   "name": "pdf_search",
-  "arguments": {
-    "doc_id": "pdf_a1b2c3d4e5f6g7h8",
-    "query": "machine learning"
-  }
+  "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8", "query": "machine learning" }
 }
 ```
 
-#### `pdf_query(doc_id, question, page_numbers?, max_pages?, max_chars?)`
-Query a document for relevant passages.
+### `pdf_query(doc_id, question, page_numbers?, max_pages?, max_chars?)`
+Keyword-based retrieval for natural-language questions. Extracts keywords from
+the question and returns relevant passages plus a `keyword_occurrences` map
+(page, position, matched text, context) for each keyword.
 
 ```json
 {
   "name": "pdf_query",
-  "arguments": {
-    "doc_id": "pdf_a1b2c3d4e5f6g7h8",
-    "question": "What are the main findings?"
-  }
+  "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8", "question": "What are the main findings?" }
 }
 ```
 
-## Multi-Column Layout Handling
+## MCP Resources
 
-Academic papers often use two-column layouts that can cause text extraction issues. The server provides tools to detect and handle these layouts.
+### `pdf://{doc_id}/content`
+Full content of a registered document (all pages, page markers included).
 
-### Detection Workflow
+### `pdf://{doc_id}/metadata`
+Plain-text metadata summary for a registered document.
 
-1. **Register the PDF** - `pdf_register` automatically detects layout and returns warnings:
-   ```json
-   {
-     "layout": {
-       "layout_type": "multi_column",
-       "columns": 2,
-       "warning": "Multi-column layout detected..."
-     },
-     "sample_text": "<first 1000 chars>",
-     "layout_guidance": "Use pdf_detect_layout with sample_text..."
-   }
-   ```
+## Usage recommendations
 
-2. **Get LLM Analysis** - Call `pdf_detect_layout` with sample text:
-   ```json
-   {
-     "name": "pdf_detect_layout",
-     "arguments": {
-       "doc_id": "pdf_<hash>",
-       "sample_text": "<from registration response>",
-       "use_alias_fast": true
-     }
-   }
-   ```
+1. **Register once, query many times.** Call `pdf_register` once and reuse the
+   returned `doc_id` for all metadata/search/query/get_page calls. Results are
+   cached by content hash, so re-registering an unchanged file is fast.
 
-3. **Review LLM Reasoning** - The response includes:
-   - `llm_reasoning`: Why the LLM chose this layout
-   - `llm_layout_mode`: Recommended mode ("single_column", "two_column_flow", etc.)
-   - `fragmentation_risk`: "low", "medium", or "high"
-   - `recommended_extraction`: "position_order" or "logical_order"
+2. **Prefer `pdf_search` for exact phrases.** It is whitespace-insensitive, so
+   a phrase split across a line break or column boundary still matches.
 
-### Layout Modes
+3. **Use `pdf_query` for topic discovery.** It extracts keywords and returns
+   occurrence locations, which is useful for locating where a topic is discussed.
 
-- **`single_column`**: Standard left-to-right, top-to-bottom flow
-- **`two_column_parallel`**: Two columns read top-to-bottom, left-to-right
-- **`two_column_flow`**: Left column top-to-bottom, then right column top-to-bottom
-- **`multi_column`**: Complex layouts (3+ columns)
+4. **Set `BLABLADOR_TOKEN` to fix concatenated words.** Two-column PDFs
+   sometimes ship with a text layer missing spaces (e.g.
+   `associatingeachpixelwithaclasslabelsuchasorgantypeand/or`). With the token
+   set, the server re-inserts spaces via alias-fast; otherwise those lines fall
+   back to OCR, which is less reliable.
 
-### alias-fast Integration
+5. **For scanned PDFs, ensure Tesseract is installed.** Pages with no text layer
+   are OCR'd automatically. Verify with `tesseract --version`.
 
-When `BLABLADOR_TOKEN` is set, the server calls alias-fast to analyze sample text and provide LLM-based layout reasoning. This helps determine the correct extraction mode for complex PDFs.
+6. **Use `pdf_detect_layout` with a `verify_sentence`** to deterministically
+   confirm whether a column-spanning sentence is preserved, before trusting the
+   extracted text for that document.
+
+7. **Clear the cache after upgrading.** `pdf_register --clear-cache` (or
+   `rm -rf ~/.cache/pdf_mcp/*`) forces reprocessing so results reflect the
+   current code.
 
 ## Jan MCP Configuration
 
-Add this to your Jan configuration file (`~/.jan/config.json` or the Jan app settings):
+Add this to your Jan configuration:
 
 ```json
 {
   "mcpServers": {
     "pdf-server": {
       "command": "/mnt/c/work/ConvenienceScripts/pdf_mcp/.venv/bin/python",
-      "args": [
-        "-m",
-        "pdf_mcp.server"
-      ],
-      "env": {
-        "PDF_MCP_CACHE_DIR": "/home/user/.cache/pdf_mcp"
-      }
+      "args": ["-m", "pdf_mcp.server"],
+      "env": { "PDF_MCP_CACHE_DIR": "/home/user/.cache/pdf_mcp" }
     }
   }
 }
 ```
 
 For Windows with WSL2 (adjust paths accordingly):
+
 ```json
 {
   "mcpServers": {
     "pdf-server": {
       "command": "/usr/bin/python3",
-      "args": [
-        "-m",
-        "pdf_mcp.server"
-      ],
+      "args": ["-m", "pdf_mcp.server"],
       "cwd": "/mnt/c/work/ConvenienceScripts/pdf_mcp",
-      "env": {
-        "PDF_MCP_CACHE_DIR": "/home/user/.cache/pdf_mcp"
-      }
+      "env": { "PDF_MCP_CACHE_DIR": "/home/user/.cache/pdf_mcp" }
     }
   }
 }
 ```
 
-> **Windows + WSL path handling**: Because this server needs Tesseract/poppler
-> (available only inside WSL), it runs in WSL while the AI agent may run on the
-> Windows host. The server automatically translates Windows paths to their WSL
-> equivalents. `C:\Users\me\doc.pdf`, `C:/Users/me/doc.pdf`, and
-> `file:///C:/Users/me/doc.pdf` all resolve to `/mnt/c/Users/me/doc.pdf` inside
-> WSL. Point `pdf_register` at the Windows path and it will be found.
+> **Windows + WSL path handling:** the server runs in WSL and automatically
+> translates Windows paths to their WSL equivalents. `C:\Users\me\doc.pdf`,
+> `C:/Users/me/doc.pdf`, and `file:///C:/Users/me/doc.pdf` all resolve to
+> `/mnt/c/Users/me/doc.pdf`. Point `pdf_register` at the Windows path and it
+> will be found.
 
-### Connecting Windows Jan to a WSL HTTP server
+### Connecting a Windows client to a WSL HTTP server
 
-If Jan runs on Windows and the PDF server runs inside WSL over HTTP, configure
-Jan with a `url` (Jan connects to the already-running server instead of spawning
-a command):
+If the client runs on Windows and the server runs inside WSL over HTTP,
+configure the client with a `url` (connect to the already-running server):
 
 ```json
 {
   "mcpServers": {
-    "pdf-server": {
-      "url": "http://127.0.0.1:8560/mcp"
-    }
+    "pdf-server": { "url": "http://127.0.0.1:8560/mcp" }
   }
 }
 ```
 
 - Use `http://127.0.0.1:8560/mcp` with the WSL NAT port proxy (Option A above).
-- Use `http://<windows-lan-ip>:8560/mcp` with mirrored networking (Option B above).
-
-## Testing with MCP Inspector
-
-The MCP Inspector allows you to test your server interactively.
-
-### Start the Inspector
-```bash
-npx @modelcontextprotocol/inspector
-```
-
-### Configure for PDF Server
-
-In the Inspector UI:
-
-1. **Transport Type**: Select `STDIO`
-2. **Command**: `/mnt/c/work/ConvenienceScripts/pdf_mcp/.venv/bin/python`
-3. **Arguments**: `-m pdf_mcp.server`
-4. **Working Directory**: `/mnt/c/work/ConvenienceScripts/pdf_mcp`
-5. Click **Connect**
-
-### Test Workflow
-
-1. **List Tools**: Click the "Tools" tab → "List Tools"
-   - Verify all 5 tools are available: `pdf_register`, `pdf_metadata`, `pdf_get_page`, `pdf_search`, `pdf_query`
-
-2. **Register a PDF**:
-   ```json
-   {
-     "file_path": "file:///mnt/c/work/ConvenienceScripts/pdf_mcp/test_data/paper.pdf"
-   }
-   ```
-
-3. **Get Metadata**: Use the returned `doc_id`
-   ```json
-   {
-     "doc_id": "pdf_a1b2c3d4..."
-   }
-   ```
-
-4. **Get Pages**:
-   ```json
-   {
-     "doc_id": "pdf_a1b2c3d4...",
-     "page_numbers": "1-3"
-   }
-   ```
-
-5. **Search**:
-   ```json
-   {
-     "doc_id": "pdf_a1b2c3d4...",
-     "query": "machine learning"
-   }
-   ```
-
-6. **Query**:
-   ```json
-   {
-     "doc_id": "pdf_a1b2c3d4...",
-     "question": "What is the main topic?"
-   }
-   ```
+- Use `http://<windows-lan-ip>:8560/mcp` with mirrored networking (Option B).
 
 ## Running Unit Tests
 
@@ -459,16 +390,21 @@ pytest tests/ -v
 # Run with coverage
 pytest tests/ -v --cov=pdf_mcp --cov-report=term-missing
 
-# Run specific test
-pytest tests/test_server.py::TestServerTools::test_pdf_register_text_pdf -v
+# Run a specific test
+pytest tests/test_server.py::TestServerTools -v
 ```
+
+The tests use `tests/test_data.json` to drive expected values (page counts,
+titles, full-sentence checks, and keyword occurrence counts) against real PDFs
+in `test_data/`.
 
 ## Security Considerations
 
-1. **Read-Only**: The server only reads PDFs; it has no write component.
-2. **Local Use Only**: This server is designed for local, trusted use only.
-3. **No Authentication**: The server does not implement authentication.
-4. **File Privileges**: The server runs with the privileges of the user executing it.
+1. **Read-Only**: the server only reads PDFs; it has no write component.
+2. **Local Use Only**: designed for local, trusted use only.
+3. **No Authentication**: the server does not implement authentication.
+4. **File Privileges**: the server runs with the privileges of the user
+   executing it.
 
 ## Troubleshooting
 
@@ -477,29 +413,26 @@ pytest tests/test_server.py::TestServerTools::test_pdf_register_text_pdf -v
 Error: Tesseract not available
 ```
 - Verify installation: `tesseract --version`
-- Set `TESSERACT_PATH` environment variable if not in PATH
+- Set `TESSERACT_PATH` if not on PATH.
 
-### Poppler Not Found
-```
-Error: pdf2image requires poppler
-```
-- Install poppler-utils (Linux) or Poppler (Windows/macOS)
+### Concatenated words not being repaired
+- Confirm `BLABLADOR_TOKEN` is set. Without it, lines fall back to OCR.
+- Check network access to the Blablador API.
 
 ### Permission Denied / File Not Found
 ```
 Error: File does not exist: /mnt/c/...
 ```
-- Confirm the Windows path maps correctly to WSL. `C:\Users\me\doc.pdf` becomes
-  `/mnt/c/Users/me/doc.pdf`. Verify the file exists inside WSL:
-  `ls /mnt/c/Users/me/doc.pdf`
-- Ensure the relevant drive is mounted in WSL (typically automatic for `/mnt/c`).
+- Confirm the Windows path maps correctly to WSL (`C:\Users\me\doc.pdf` becomes
+  `/mnt/c/Users/me/doc.pdf`) and that the file exists inside WSL.
+- Ensure the relevant drive is mounted in WSL.
 
 ### Cache Errors
 ```
 Error: Failed to load cache data
 ```
 - Clear cache: `rm -rf ~/.cache/pdf_mcp/*`
-- Or set a different `PDF_MCP_CACHE_DIR`
+- Or set a different `PDF_MCP_CACHE_DIR`.
 
 ## Project Structure
 
@@ -507,17 +440,20 @@ Error: Failed to load cache data
 pdf_mcp/
 ├── src/
 │   └── pdf_mcp/
-│       ├── __init__.py
-│       ├── server.py       # FastMCP server and tools
-│       ├── models.py       # Pydantic data models
-│       ├── pdf_processor.py # MarkItDown + OCR processing
-│       ├── cache.py        # Content-hash caching
-│       └── utils.py        # Path validation utilities
+│       ├── __init__.py       # Package metadata
+│       ├── server.py         # FastMCP server, MCP tools, and resources
+│       ├── models.py         # Pydantic data models
+│       ├── pdf_processor.py  # Region-aware extraction, OCR, and LLM repair
+│       ├── cache.py          # Content-hash caching
+│       └── utils.py          # Path validation and helpers
 ├── tests/
-│   └── test_server.py      # Unit tests
+│   ├── test_server.py        # Unit tests
+│   └── test_data.json        # Expected values driving the tests
 ├── test_data/
-│   ├── paper.pdf          # PDF with text layer
-│   └── paper_image.pdf    # Scanned PDF (no text)
+│   ├── paper_short.pdf           # Two-column PDF with a text layer
+│   ├── paper_short_image.pdf     # Scanned PDF (no text)
+│   ├── vroot_short.pdf           # Two-column PDF (VRoot)
+│   └── vroot_image_short.pdf     # Scanned PDF (VRoot)
 ├── pyproject.toml
 └── README.md
 ```
