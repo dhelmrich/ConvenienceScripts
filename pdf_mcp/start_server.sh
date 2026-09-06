@@ -1,4 +1,3 @@
-#!/bin/bash
 # PDF MCP Server Startup Script
 # 
 # This script:
@@ -9,6 +8,7 @@
 #   ./start_server.sh                    # Default: http://127.0.0.1:8000
 #   ./start_server.sh --port 9000        # Custom port
 #   ./start_server.sh --host 0.0.0.0     # Bind to all interfaces
+#   ./start_server.sh --keep-cache       # Retain existing cache (don't clear it)
 
 set -e
 
@@ -18,8 +18,9 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 CACHE_DIR="${HOME}/.cache/pdf_mcp"
 
 # Default server settings
-HOST="127.0.0.1"
+HOST="0.0.0.0"
 PORT="8000"
+KEEP_CACHE="false"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -32,18 +33,24 @@ while [[ $# -gt 0 ]]; do
             PORT="$2"
             shift 2
             ;;
+        --keep-cache)
+            KEEP_CACHE="true"
+            shift
+            ;;
         --help)
-            echo "Usage: $0 [--host HOST] [--port PORT]"
+            echo "Usage: $0 [--host HOST] [--port PORT] [--keep-cache]"
             echo ""
             echo "Options:"
-            echo "  --host HOST    HTTP bind host (default: 127.0.0.1)"
+            echo "  --host HOST    HTTP bind host (default: *)"
             echo "  --port PORT    HTTP bind port (default: 8000)"
+            echo "  --keep-cache   Retain the existing PDF cache (default: clear it)"
             echo "  --help         Show this help message"
             echo ""
             echo "Examples:"
-            echo "  $0                           # Start on http://127.0.0.1:8000"
-            echo "  $0 --port 9000               # Start on http://127.0.0.1:9000"
-            echo "  $0 --host 0.0.0.0 --port 80  # Start on http://0.0.0.0:80"
+            echo "  $0                           # Start on http://*:8000 (clears cache)"
+            echo "  $0 --port 9000               # Start on http://*:9000"
+            echo "  $0 --host 127.0.0.1 --port 80  # Start on http://127.0.0.1:80"
+            echo "  $0 --keep-cache              # Start keeping the existing cache"
             exit 0
             ;;
         *)
@@ -59,13 +66,22 @@ echo "PDF MCP Server Startup"
 echo "========================================"
 echo ""
 
-# Step 1: Clear the PDF cache
-echo "[1/3] Clearing PDF cache..."
-if [ -d "${CACHE_DIR}" ]; then
-    rm -rf "${CACHE_DIR}"/*
-    echo "      Cache cleared: ${CACHE_DIR}"
+# Step 1: Clear the PDF cache (unless --keep-cache)
+if [ "${KEEP_CACHE}" = "true" ]; then
+    echo "[1/3] Retaining existing PDF cache (--keep-cache)..."
+    if [ -d "${CACHE_DIR}" ]; then
+        echo "      Cache kept: ${CACHE_DIR}"
+    else
+        echo "      Cache directory does not exist (will be created on first use)"
+    fi
 else
-    echo "      Cache directory does not exist (will be created on first use)"
+    echo "[1/3] Clearing PDF cache..."
+    if [ -d "${CACHE_DIR}" ]; then
+        rm -rf "${CACHE_DIR}"/*
+        echo "      Cache cleared: ${CACHE_DIR}"
+    else
+        echo "      Cache directory does not exist (will be created on first use)"
+    fi
 fi
 echo ""
 
@@ -97,5 +113,9 @@ echo ""
 echo "Press Ctrl+C to stop the server"
 echo ""
 
-# Start server with HTTP transport and cache clearing
-python -m pdf_mcp.server --transport http --host "${HOST}" --port "${PORT}" --clear-cache
+# Start server with HTTP transport; clear cache unless --keep-cache
+if [ "${KEEP_CACHE}" = "true" ]; then
+    python -m pdf_mcp.server --transport http --host "${HOST}" --port "${PORT}"
+else
+    python -m pdf_mcp.server --transport http --host "${HOST}" --port "${PORT}" --clear-cache
+fi

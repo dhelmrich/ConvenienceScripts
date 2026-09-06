@@ -1,7 +1,6 @@
 """FastMCP server for PDF ingestion and analysis."""
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -12,15 +11,18 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from fastmcp import FastMCP
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image
+from mcp.types import TextContent
 
 from .cache import PDFCache
 from .models import DocumentPassage, PageContent, PDFMetadata, SearchHit
 from .pdf_processor import (
     PDFProcessor,
     PDFProcessorError,
-    extract_figures_from_pdf,
+    extract_figures_from_pdf as extract_figures_from_pdf_impl,
     pdf_bbox_to_image_bbox,
-    guided_seek_single_box,
+    guided_seek_single_box as guided_seek_single_box_impl,
     GuidedSeekCancelledError,
 )
 from .utils import (
@@ -750,13 +752,16 @@ async def fetch_formula(
     number: int,
     dpi: int = 300,
     transcribe: bool = True,
-) -> Dict[str, Any]:
+):
     """
     Fetch a detected display formula by number.
 
     Crops the formula's region from the page into a high-resolution PNG image
     (because the PDF's linear text cannot represent the 2D math structure) and
     optionally transcribes it to LaTeX using pix2tex (LaTeX-OCR) when installed.
+
+    The crop is returned as an image content block (for vision-capable models),
+    not as base64 text.
 
     Args:
         doc_id: Document ID from pdf_register
@@ -765,8 +770,8 @@ async def fetch_formula(
         transcribe: If True, attempt LaTeX transcription with pix2tex
 
     Returns:
-        The formula's page, bbox, a base64-encoded PNG of the crop, the
-        original linear text, and (when available) the LaTeX transcription.
+        Metadata (page, bbox, original linear text, and LaTeX transcription
+        when available) plus the formula crop as an image content block.
     """
     doc = _registered_docs.get(doc_id)
     if not doc:
@@ -794,22 +799,26 @@ async def fetch_formula(
             "bbox": formula["bbox"],
         }
 
-    result: Dict[str, Any] = {
+    metadata: Dict[str, Any] = {
         "success": True,
         "doc_id": doc_id,
         "page": formula["page"],
         "number": number,
         "bbox": formula["bbox"],
         "text": formula.get("text", ""),
-        "image_png_b64": base64.b64encode(image).decode("ascii"),
-        "image_format": "png",
         "image_dpi": dpi,
     }
 
     if transcribe:
-        result["latex"] = processor.transcribe_formula_image(image)
+        metadata["latex"] = processor.transcribe_formula_image(image)
 
-    return result
+    return ToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(metadata, indent=2)),
+            Image(data=image, format="png"),
+        ],
+        structured_content=metadata,
+    )
 
 
 @mcp.tool()
@@ -872,12 +881,15 @@ async def fetch_figure(
     doc_id: str,
     number: int,
     dpi: int = 300,
-) -> Dict[str, Any]:
+):
     """
     Fetch a detected figure by number.
 
     Crops the figure's region from the page into a high-resolution PNG image.
     Returns the image along with any detected caption.
+
+    The crop is returned as an image content block (for vision-capable models),
+    not as base64 text.
 
     Args:
         doc_id: Document ID from pdf_register
@@ -885,8 +897,8 @@ async def fetch_figure(
         dpi: Render resolution for the crop (default 300)
 
     Returns:
-        The figure's page, bbox, a base64-encoded PNG of the crop,
-        the caption (if detected), and image metadata.
+        The figure's page, bbox, the caption (if detected), and image metadata,
+        plus the figure crop as an image content block.
     """
     doc = _registered_docs.get(doc_id)
     if not doc:
@@ -914,18 +926,24 @@ async def fetch_figure(
             "bbox": figure["bbox"],
         }
 
-    return {
+    metadata = {
         "success": True,
         "doc_id": doc_id,
         "page": figure["page"],
         "number": number,
         "bbox": figure["bbox"],
         "caption": figure.get("caption", ""),
-        "image_png_b64": base64.b64encode(image).decode("ascii"),
-        "image_format": "png",
         "image_dpi": dpi,
         "has_image": figure.get("has_image", False),
     }
+
+    return ToolResult(
+        content=[
+            TextContent(type="text", text=json.dumps(metadata, indent=2)),
+            Image(data=image, format="png"),
+        ],
+        structured_content=metadata,
+    )
 
 
 @mcp.tool()
@@ -966,7 +984,7 @@ async def extract_figures_from_pdf(
         validated_path = validate_file_path(pdf_path, "PDF file")
         validate_pdf_file(validated_path)
 
-        figures = extract_figures_from_pdf(str(validated_path))
+        figures = extract_figures_from_pdf_impl(str(validated_path))
 
         return {
             "success": True,
@@ -988,14 +1006,15 @@ def guided_seek_single_box(
     page_number: int,
     instruction: Optional[str] = None,
     dpi: int = 150,
-) -> Dict[str, Any]:
+    include_full_page: bool = False,
+):
     """
     Open a PDF page in a GUI window and let the user draw a single bounding box.
-    
+
     This is a **vision-native** tool for user-assisted figure/region selection.
     The user sees the rendered PDF page and draws a rectangle around the region
-    they want the model to inspect. The tool returns the cropped region as a PNG
-    image, which the vision-capable LLM can then analyze.
+    they want the model to inspect. The tool returns the cropped region as a
+    PNG image content block, which the vision-capable LLM can then analyze.
 
     Use this when:
     - `extract_figures_from_pdf` missed a figure and you want to recover it
@@ -1006,48 +1025,49 @@ def guided_seek_single_box(
     1. Renders the specified page at the given DPI
     2. Opens a window showing the page
     3. Lets the user draw one rectangle
-    4. Returns the cropped image along with PDF and image coordinates
+    4. Returns the cropped image (as an image content block) along with
+       PDF and image coordinates
 
     Args:
         pdf_path: Path to the PDF file
         page_number: 1-based page number to display
         instruction: Optional instruction shown to the user (default: generic instruction)
         dpi: Rendering resolution (default: 150)
+        include_full_page: Also return the full rendered page as a second
+            image content block for context (default: False)
 
     Returns:
-        Dict with:
-        - success: bool
-        - page: int (1-based page number)
-        - bbox_pdf: [x0, y0, x1, y1] in PDF points (bottom-left origin)
-        - bbox_image: [x0, y0, x1, y1] in image pixels (top-left origin)
-        - crop_image_png: base64-encoded PNG of the cropped region
-        - full_page_image_png: base64-encoded PNG of the full page (for context)
-        - instruction: str (the instruction shown to the user)
-        - error: str (if success is False)
+        Metadata (page, bbox_pdf, bbox_image, instruction, dpi) as structured
+        output, plus the cropped region as an image content block.
     """
     try:
         validated_path = validate_file_path(pdf_path, "PDF file")
         validate_pdf_file(validated_path)
 
-        result = guided_seek_single_box(
+        result = guided_seek_single_box_impl(
             str(validated_path),
             page_number=page_number,
             instruction=instruction,
             dpi=dpi,
         )
 
-        # Encode images as base64 for transport
-        import base64
-        return {
+        metadata = {
             "success": True,
             "page": result["page"],
             "bbox_pdf": result["bbox_pdf"],
             "bbox_image": result["bbox_image"],
-            "crop_image_png": base64.b64encode(result["crop_image"]).decode("ascii"),
-            "full_page_image_png": base64.b64encode(result["full_page_image"]).decode("ascii"),
             "instruction": result["instruction"],
             "dpi": result["dpi"],
         }
+
+        content: List[Any] = [
+            TextContent(type="text", text=json.dumps(metadata, indent=2)),
+            Image(data=result["crop_image"], format="png"),
+        ]
+        if include_full_page:
+            content.append(Image(data=result["full_page_image"], format="png"))
+
+        return ToolResult(content=content, structured_content=metadata)
 
     except GuidedSeekCancelledError as e:
         return {

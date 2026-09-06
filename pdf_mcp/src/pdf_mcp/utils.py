@@ -55,7 +55,7 @@ def _wsl_translate(path_str: str) -> str:
     return path_str
 
 
-def validate_file_path(path_str: str) -> Path:
+def validate_file_path(path_str: str, label: str = "File") -> Path:
     """
     Validate that a local path (or file:// URI) points to a real, readable file.
 
@@ -67,6 +67,7 @@ def validate_file_path(path_str: str) -> Path:
 
     Args:
         path_str: The path string to validate (can be file:// URI or plain path)
+        label: Human-readable label for error messages (e.g. "PDF file")
 
     Returns:
         Resolved and validated Path object
@@ -87,18 +88,18 @@ def validate_file_path(path_str: str) -> Path:
     try:
         path = Path(path_str).expanduser().resolve()
     except Exception as e:
-        raise PDFValidationError(f"Invalid path: {e}")
+        raise PDFValidationError(f"Invalid {label} path: {e}")
 
     # Check file exists
     if not path.exists():
-        raise PDFValidationError(f"File does not exist: {path}")
+        raise PDFValidationError(f"{label} does not exist: {path}")
 
     # Check it's a regular file, and that we can read it
     if not path.is_file():
         raise PDFValidationError(f"Path is not a file: {path}")
 
     if not os.access(path, os.R_OK):
-        raise PDFValidationError(f"File is not readable: {path}")
+        raise PDFValidationError(f"{label} is not readable: {path}")
 
     return path
 
