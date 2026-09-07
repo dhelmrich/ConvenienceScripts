@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -2272,6 +2273,26 @@ class GuidedSeekCancelledError(Exception):
     pass
 
 
+# Per-thread registry of the live box-selector window, so a window left
+# behind by a previous call (e.g. an interrupted one) can be force-closed
+# before a new one is created.
+_box_selector_state = threading.local()
+
+
+def _safe_destroy_tk_root(root, tk) -> None:
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
+def _force_close_stale_selector(tk) -> None:
+    stale = getattr(_box_selector_state, "root", None)
+    if stale is not None:
+        _safe_destroy_tk_root(stale, tk)
+        _box_selector_state.root = None
+
+
 def guided_seek_single_box(
     pdf_path: str,
     page_number: int,
@@ -2331,13 +2352,6 @@ def guided_seek_single_box(
             f"Invalid page number {page_number}. PDF has {len(doc)} pages."
         )
 
-    # Get PDF page dimensions from first page (for coordinate conversion)
-    first_page = doc[0]
-    page_rect = first_page.rect
-    pdf_width_pt = page_rect.width
-    pdf_height_pt = page_rect.height
-    page_rotation = first_page.rotation
-
     if instruction is None:
         instruction = (
             "Draw a rectangle around the figure or region you want the model to inspect. "
@@ -2360,9 +2374,6 @@ def guided_seek_single_box(
         all_page_bytes.append(img_bytes)
         all_page_images.append(Image.open(io.BytesIO(img_bytes)))
 
-    # Get image dimensions from first page
-    img_width, img_height = all_page_images[0].size
-
     # Create GUI window for box selection
     try:
         import tkinter as tk
@@ -2374,12 +2385,12 @@ def guided_seek_single_box(
         )
 
     class BoxSelector:
-        def __init__(self, root, all_images, all_bytes, instruction, total_pages):
+        def __init__(self, root, all_images, all_bytes, instruction, total_pages, start_page=0):
             self.root = root
             self.all_images = all_images
             self.all_bytes = all_bytes
             self.instruction = instruction
-            self.current_page = 0
+            self.current_page = start_page
             self.total_pages = total_pages
             self.start_x = None
             self.start_y = None
@@ -2387,7 +2398,7 @@ def guided_seek_single_box(
             self.box = None  # (x0, y0, x1, y1) in image coordinates
 
             # Set up window
-            root.title(f"guided_seek_single_box - Page 1/{total_pages}")
+            root.title(f"guided_seek_single_box - Page {start_page + 1}/{total_pages}")
             root.resizable(True, True)
 
             # Main frame
@@ -2526,7 +2537,10 @@ def guided_seek_single_box(
             
             # Clear and redraw
             self.canvas.delete("all")
-            self._photo_ref = ImageTk.PhotoImage(self.display_img)
+            # Pass master explicitly: ImageTk would otherwise resolve the
+            # default root, which may be a stale root from a previous call
+            # living in a different Tcl interpreter.
+            self._photo_ref = ImageTk.PhotoImage(self.display_img, master=self.root)
             self.canvas.create_image(0, 0, anchor=tk.NW, image=self._photo_ref)
             
             # Redraw box if exists
@@ -2639,50 +2653,65 @@ def guided_seek_single_box(
                 int(y1 * scale_y)
             )
 
+    # Force-close any window a previous (e.g. interrupted) call left behind
+    _force_close_stale_selector(tk)
+
     # Create and run the GUI
     root = tk.Tk()
-    selector = BoxSelector(root, all_page_images, all_page_bytes, instruction, len(doc))
+    _box_selector_state.root = root
+    try:
+        selector = BoxSelector(
+            root, all_page_images, all_page_bytes, instruction, len(doc),
+            start_page=page_number - 1,
+        )
 
-    # Center the window
-    root.update_idletasks()
-    root.geometry(f"+{root.winfo_screenwidth()//2 - 400}+{root.winfo_screenheight()//2 - 300}")
+        # Center the window
+        root.update_idletasks()
+        root.geometry(f"+{root.winfo_screenwidth()//2 - 400}+{root.winfo_screenheight()//2 - 300}")
 
-    # Run the main loop
-    root.mainloop()
+        # Run the main loop (confirm/cancel call root.quit() to exit it)
+        root.mainloop()
 
-    # Check if cancelled
-    if selector.cancelled:
-        raise GuidedSeekCancelledError("User cancelled the box selection")
+        # Check if cancelled
+        if selector.cancelled:
+            raise GuidedSeekCancelledError("User cancelled the box selection")
 
-    # Get the box in original image coordinates
-    box_img = selector.get_scaled_box()
-    if box_img is None:
-        raise PDFValidationError("No box was selected")
+        # Get the box in original image coordinates
+        box_img = selector.get_scaled_box()
+        if box_img is None:
+            raise PDFValidationError("No box was selected")
 
-    x0_img, y0_img, x1_img, y1_img = box_img
+        x0_img, y0_img, x1_img, y1_img = box_img
 
-    # Crop the region from the current page's image
-    crop = all_page_images[selector.current_page].crop((x0_img, y0_img, x1_img, y1_img))
-    crop_bytes = io.BytesIO()
-    crop.save(crop_bytes, format="PNG")
-    crop_bytes = crop_bytes.getvalue()
+        # Crop the region from the current page's image
+        current_page = doc[selector.current_page]
+        crop = all_page_images[selector.current_page].crop((x0_img, y0_img, x1_img, y1_img))
+        crop_bytes = io.BytesIO()
+        crop.save(crop_bytes, format="PNG")
+        crop_bytes = crop_bytes.getvalue()
 
-    # Convert to PDF coordinates
-    bbox_pdf = image_bbox_to_pdf_bbox(
-        (img_width, img_height),
-        (x0_img, y0_img, x1_img, y1_img),
-        (pdf_width_pt, pdf_height_pt),
-        page_rotation
-    )
+        # Convert to PDF coordinates using the displayed page's dimensions
+        bbox_pdf = image_bbox_to_pdf_bbox(
+            all_page_images[selector.current_page].size,
+            (x0_img, y0_img, x1_img, y1_img),
+            (current_page.rect.width, current_page.rect.height),
+            current_page.rotation,
+        )
 
-    doc.close()
-
-    return {
-        "page": page_number,
-        "bbox_pdf": list(bbox_pdf),
-        "bbox_image": list(box_img),
-        "crop_image": crop_bytes,
-        "full_page_image": img_bytes,
-        "instruction": instruction,
-        "dpi": dpi,
-    }
+        return {
+            "page": selector.current_page + 1,
+            "bbox_pdf": list(bbox_pdf),
+            "bbox_image": list(box_img),
+            "crop_image": crop_bytes,
+            "full_page_image": all_page_bytes[selector.current_page],
+            "instruction": instruction,
+            "dpi": dpi,
+        }
+    finally:
+        # Always close the window (quit() only exits the main loop; destroy()
+        # removes the window and releases the Tcl interpreter). This also
+        # clears tkinter's module-level default root, which otherwise keeps
+        # a stale interpreter alive and breaks the next call.
+        _box_selector_state.root = None
+        _safe_destroy_tk_root(root, tk)
+        doc.close()
