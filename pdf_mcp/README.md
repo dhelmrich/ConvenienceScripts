@@ -280,16 +280,30 @@ page, position, snippet, and context.
 ```
 
 ### `pdf_query(doc_id, question, page_numbers?, max_pages?, max_chars?)`
-Keyword-based retrieval for natural-language questions. Extracts keywords from
-the question and returns relevant passages plus a `keyword_occurrences` map
-(page, position, matched text, context) for each keyword.
+**Keyword-based topic location — NOT semantic search and NOT a question
+answering tool.** It splits your `question` into individual words (>3 chars),
+matches each word literally (whitespace-insensitive), ranks pages by raw
+keyword-hit count, and returns the most **dense keyword-populated excerpts**
+as `passages` plus a `keyword_occurrences` map (page, position, matched text,
+context) for each keyword. It does **not** return a synthesized answer.
 
 ```json
 {
   "name": "pdf_query",
-  "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8", "question": "What are the main findings?" }
+  "arguments": { "doc_id": "pdf_a1b2c3d4e5f6g7h8", "question": "experimental setup" }
 }
 ```
+
+**Correct usage (LLM contract):**
+- Pass a **short term or topic** (e.g. `"experimental setup"`, `"conclusions"`),
+  not a full sentence. Full questions dilute scoring with stopwords (`what`,
+  `does`, `about`) that are not real keywords.
+- Use the returned `passages` only as **pointers** — call `pdf_get_page` on the
+  cited pages to read the actual content before answering.
+- Matching is **literal**: no stemming or synonyms (`finding` does not match
+  `found`). For an exact phrase, use `pdf_search`.
+- The tool returns raw excerpts, **not an answer**; the LLM must read and reason
+  over them.
 
 ## MCP Resources
 
@@ -308,8 +322,11 @@ Plain-text metadata summary for a registered document.
 2. **Prefer `pdf_search` for exact phrases.** It is whitespace-insensitive, so
    a phrase split across a line break or column boundary still matches.
 
-3. **Use `pdf_query` for topic discovery.** It extracts keywords and returns
-   occurrence locations, which is useful for locating where a topic is discussed.
+3. **Use `pdf_query` to locate a topic, then `pdf_get_page` to read it.**
+   `pdf_query` returns dense keyword excerpts as *pointers* to where a topic is
+   discussed — it does not answer the question. Pass a short term/topic (not a
+   full sentence) and follow up with `pdf_get_page` on the cited pages to get
+   the full content before answering.
 
 4. **Set `BLABLADOR_TOKEN` to fix concatenated words.** Two-column PDFs
    sometimes ship with a text layer missing spaces (e.g.
@@ -324,9 +341,17 @@ Plain-text metadata summary for a registered document.
    confirm whether a column-spanning sentence is preserved, before trusting the
    extracted text for that document.
 
-7. **Clear the cache after upgrading.** `pdf_register --clear-cache` (or
-   `rm -rf ~/.cache/pdf_mcp/*`) forces reprocessing so results reflect the
-   current code.
+7. **Clear the cache after upgrading.** `start_server.sh --clear-cache` (or
+   `python -m pdf_mcp.server --clear-cache`, or `rm -rf ~/.cache/pdf_mcp/*`)
+   forces reprocessing so results reflect the current code. The cache is
+   retained by default.
+
+8. **Auto-register PDFs at startup with a CSV list.**
+   `start_server.sh --pdf-list pdfs.csv` registers every PDF listed in the
+   file before the server accepts connections. Rows are `path` or
+   `path,description`; `#` lines are comments; a directory row expands to
+   all `*.pdf` inside (recursively). The `PDF_MCP_PDF_LIST` env var
+   (colon-separated paths) works as a fallback.
 
 ## Jan MCP Configuration
 

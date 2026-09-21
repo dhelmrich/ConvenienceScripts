@@ -1,13 +1,14 @@
 """FastMCP server for PDF ingestion and analysis."""
 
 import asyncio
+import csv
 import json
 import logging
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from fastmcp import FastMCP
@@ -90,6 +91,62 @@ def _build_citation(doc_id: str, pages: List[int]) -> str:
         return f"{doc_id[:8]} (pages {pages[0]} and {pages[1]})"
     else:
         return f"{doc_id[:8]} (pages {pages[0]}-{pages[-1]})"
+
+
+def _clean_page_markdown(markdown: str) -> str:
+    """Strip markdown syntax so keyword positions refer to plain text."""
+    text = re.sub(r"```[\s\S]*?```", "", markdown)
+    text = re.sub(r"`[^`]+`", "", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"#+\s*", "", text)
+    text = re.sub(r"^\s*[-*+]\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+\.\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", text)
+    text = re.sub(r"\[([^\]]*)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"-{2,}", "", text)
+    return text.strip()
+
+
+def _dense_passage_windows(
+    text: str,
+    occurrences: List[Tuple[int, int]],
+    max_chars: int,
+    cluster_gap: int = 400,
+    context: int = 120,
+) -> List[str]:
+    """
+    Build dense, keyword-populated excerpts by clustering nearby keyword
+    occurrence spans in `text` and expanding each cluster with surrounding
+    context. Clusters are returned as bounded snippets honoring `max_chars`.
+    """
+    if not text or not occurrences:
+        return []
+    occs = sorted(occurrences)
+
+    # Cluster occurrences that are close together into a single window.
+    clusters: List[List[Tuple[int, int]]] = [[occs[0]]]
+    for oc in occs[1:]:
+        if oc[0] - clusters[-1][-1][1] <= cluster_gap:
+            clusters[-1].append(oc)
+        else:
+            clusters.append([oc])
+
+    windows: List[str] = []
+    total = 0
+    for cluster in clusters:
+        start = max(0, cluster[0][0] - context)
+        end = min(len(text), cluster[-1][1] + context)
+        snippet = text[start:end].strip()
+        if total + len(snippet) > max_chars:
+            remaining = max_chars - total
+            if remaining > 200:
+                windows.append(snippet[:remaining] + "\n...[truncated]")
+            break
+        windows.append(snippet)
+        total += len(snippet)
+
+    return windows
 
 
 def _truncate_content(content: str, max_chars: int = 2000) -> str:
@@ -1207,26 +1264,38 @@ async def pdf_query(
     max_chars: int = 3000,
 ) -> Dict[str, Any]:
     """
-    Query a document for relevant passages related to a question.
+    LOCATE where a topic is discussed using KEYWORD retrieval. This is NOT
+    semantic search and it does NOT answer the question — it returns raw,
+    keyword-dense text passages for you (the LLM) to read and reason over.
 
-    This performs keyword-based retrieval, returning bounded passages
-    with page citations. Keywords are matched irrespective of intermediate
-    whitespaces (spaces, tabs, newlines).
+    HOW IT WORKS:
+    - Your `question` is split into individual words (>3 chars); each word is
+      matched literally (whitespace-insensitive) against the document text.
+    - Pages are ranked by raw keyword-hit count and the most keyword-dense
+      excerpts are returned as `passages` (bounded by max_pages/max_chars).
+    - A `keyword_occurrences` map lists every match location per keyword.
 
-    The response includes:
-    - passages: Relevant content passages with citations
-    - keyword_occurrences: For each keyword, a list of all occurrences with
-      page_number, position (character offset), and matched text
+    CORRECT USAGE:
+    - Pass a SHORT TERM or TOPIC (e.g. "experimental setup", "conclusions"),
+      not a full sentence. Long questions dilute scoring with stopwords
+      ("what", "does", "about") that are not real keywords.
+    - Use the returned `passages` only as pointers: call `pdf_get_page` on the
+      cited pages to read the actual content before answering.
+    - The match is LITERAL — no stemming or synonyms ("finding" does not match
+      "found"). For an exact phrase, prefer `pdf_search`.
+    - If you need the answer itself, you must read `passages`/cited pages and
+      reason over them; this tool returns no synthesized answer.
 
     Args:
         doc_id: Document ID from pdf_register
-        question: Natural language question
+        question: Short term or topic to locate (words are used as keywords)
         page_numbers: Optional page filter
         max_pages: Maximum pages to include in response
-        max_chars: Maximum total characters
+        max_chars: Maximum total characters across returned passages
 
     Returns:
-        Relevant passages with citations and keyword occurrence locations
+        `passages` (dense keyword excerpts with citations), `keyword_occurrences`
+        (per-keyword match locations), and the `keywords_searched` list.
     """
     doc = _registered_docs.get(doc_id)
 
@@ -1246,6 +1315,8 @@ async def pdf_query(
     # Score pages by keyword match (whitespace-insensitive)
     page_scores: Dict[int, int] = {}
     keyword_occurrences: Dict[str, List[Dict[str, Any]]] = {}
+    page_occurrences: Dict[int, List[Tuple[int, int]]] = {}
+    cleaned_texts: Dict[int, str] = {}
 
     for kw in keywords:
         keyword_occurrences[kw] = []
@@ -1256,29 +1327,22 @@ async def pdf_query(
             continue
 
         pc = doc["page_contents"][idx]
-        text = re.sub(r"```[\s\S]*?```", "", pc.markdown)
-        text = re.sub(r"`[^`]+`", "", text)
-        text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-        text = re.sub(r"\*([^*]+)\*", r"\1", text)
-        text = re.sub(r"#+\s*", "", text)
-        text = re.sub(r"^\s*[-*+]\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^\s*\d+\.\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", text)
-        text = re.sub(r"\[([^\]]*)\]\([^\)]+\)", r"\1", text)
-        text = re.sub(r"-{2,}", "", text)
-        text_clean = text.strip()
+        text_clean = _clean_page_markdown(pc.markdown)
         text_lower = text_clean.lower()
+        cleaned_texts[page_num] = text_clean
+        occs: List[Tuple[int, int]] = []
 
         score = 0
         for kw in keywords:
             # Build whitespace-insensitive pattern for keyword
             pattern = r"\s*".join(re.escape(c) for c in kw)
-            
+
             # Find all occurrences
             for match in re.finditer(pattern, text_lower, re.IGNORECASE):
                 pos = match.start()
                 matched_text = match.group()
-                
+
+                occs.append((pos, pos + len(matched_text)))
                 keyword_occurrences[kw].append({
                     "page_number": page_num,
                     "position": pos,
@@ -1289,6 +1353,7 @@ async def pdf_query(
 
         if score > 0:
             page_scores[page_num] = score
+            page_occurrences[page_num] = occs
 
     # Filter pages if specified
     if page_numbers:
@@ -1318,32 +1383,37 @@ async def pdf_query(
             "message": "No relevant content found",
         }
 
-    # Build passages
+    # Build dense, keyword-populated passages (excerpts around keyword clusters)
     passages = []
     total_chars = 0
 
     for page_num in top_pages:
-        idx = page_num - 1
-        pc = doc["page_contents"][idx]
+        occs = page_occurrences.get(page_num, [])
+        text_clean = cleaned_texts.get(page_num, "")
+        if not occs or not text_clean:
+            continue
 
-        passage = DocumentPassage(
-            doc_id=doc_id,
-            content=pc.markdown,
-            page_numbers=[page_num],
-            citation=_build_citation(doc_id, [page_num]),
-            source_path=doc["file_path"],
-        )
-
-        if total_chars + len(passage.content) > max_chars:
-            # Truncate this passage
+        # Build dense excerpts from this page, honoring the global max_chars
+        # budget (plus a small per-passage context cushion).
+        for snippet in _dense_passage_windows(text_clean, occs, max_chars):
             remaining = max_chars - total_chars
-            if remaining > 200:
-                passage.content = passage.content[:remaining] + "\n...[truncated]"
-                passages.append(passage)
-            break
+            if total_chars + len(snippet) > max_chars:
+                if remaining > 200:
+                    snippet = snippet[:remaining] + "\n...[truncated]"
+                else:
+                    break
+            passage = DocumentPassage(
+                doc_id=doc_id,
+                content=snippet,
+                page_numbers=[page_num],
+                citation=_build_citation(doc_id, [page_num]),
+                source_path=doc["file_path"],
+            )
+            passages.append(passage)
+            total_chars += len(snippet)
 
-        passages.append(passage)
-        total_chars += len(passage.content)
+        if total_chars >= max_chars:
+            break
 
     # Format response
     formatted_passages = []
@@ -1402,11 +1472,102 @@ Pages with OCR: {metadata.get('pages_with_ocr', 0)}
 """
 
 
+def parse_pdf_list(list_path: str) -> List[Tuple[str, Optional[str]]]:
+    """
+    Parse a CSV list of PDFs to auto-register at startup.
+
+    Format: one entry per row, ``path`` or ``path,description``. Blank rows and
+    rows starting with ``#`` are ignored. A path pointing to a directory is
+    expanded recursively to all ``*.pdf`` files inside it (case-insensitive).
+    ``~`` is expanded.
+
+    Args:
+        list_path: Path to the CSV file
+
+    Returns:
+        List of (file_path, description) tuples
+
+    Raises:
+        FileNotFoundError: If the CSV file does not exist
+    """
+    path = Path(list_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF list file not found: {path}")
+
+    entries: List[Tuple[str, Optional[str]]] = []
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.reader(f):
+            if not row:
+                continue
+            first = row[0].strip()
+            if not first or first.startswith("#"):
+                continue
+            description = row[1].strip() if len(row) > 1 and row[1].strip() else None
+
+            candidate = Path(first).expanduser()
+            if candidate.is_dir():
+                pdfs = sorted(
+                    p for p in candidate.rglob("*")
+                    if p.is_file() and p.suffix.lower() == ".pdf"
+                )
+                if not pdfs:
+                    logger.warning(f"No PDFs found under directory: {candidate}")
+                for pdf in pdfs:
+                    entries.append((str(pdf.resolve()), description))
+            else:
+                entries.append((str(candidate), description))
+
+    return entries
+
+
+async def register_startup_pdfs(list_files: List[str]) -> Tuple[int, int]:
+    """Register all PDFs from the given CSV list files at startup.
+
+    Args:
+        list_files: Paths to CSV list files (see :func:`parse_pdf_list`)
+
+    Returns:
+        Tuple of (succeeded, failed) counts
+    """
+    succeeded = failed = 0
+    for list_file in list_files:
+        try:
+            entries = parse_pdf_list(list_file)
+        except Exception as e:
+            logger.error(f"Failed to read PDF list {list_file}: {e}")
+            continue
+
+        logger.info(
+            f"Auto-registering {len(entries)} PDF(s) from {list_file}..."
+        )
+        for file_path, description in entries:
+            try:
+                result = await pdf_register(file_path, description)
+            except Exception as e:  # never let startup registration kill the server
+                logger.error(f"Auto-register error for {file_path}: {e}")
+                failed += 1
+                continue
+            if result.get("success"):
+                succeeded += 1
+                logger.info(
+                    f"Auto-registered {file_path} as {result['doc_id']} "
+                    f"({result['total_pages']} pages)"
+                )
+            else:
+                failed += 1
+                logger.warning(
+                    f"Auto-register failed for {file_path}: {result.get('error')}"
+                )
+
+    return succeeded, failed
+
+
 def run_server(
     transport: str = "stdio",
     host: str = "127.0.0.1",
     port: int = 8000,
     clear_cache: bool = False,
+    pdf_lists: Optional[List[str]] = None,
 ):
     """Run the MCP server.
 
@@ -1419,6 +1580,10 @@ def run_server(
         port: Port for http transport.
         clear_cache: If True, clear the on-disk cache before starting so the
             next ``pdf_register`` reprocesses documents with current code.
+        pdf_lists: Optional paths to CSV list files of PDFs to auto-register
+            at startup (see :func:`parse_pdf_list`). Defaults to the
+            ``PDF_MCP_PDF_LIST`` environment variable (colon-separated paths)
+            if set.
     """
     logger.info("Starting PDF MCP Server...")
 
@@ -1431,6 +1596,16 @@ def run_server(
     if clear_cache:
         logger.info("Clearing cache before start (--clear-cache)")
         cache.clear()
+
+    if not pdf_lists:
+        env_lists = os.environ.get("PDF_MCP_PDF_LIST", "")
+        pdf_lists = [p for p in env_lists.split(":") if p.strip()]
+
+    if pdf_lists:
+        succeeded, failed = asyncio.run(register_startup_pdfs(pdf_lists))
+        logger.info(
+            f"Startup registration done: {succeeded} registered, {failed} failed"
+        )
 
     if transport == "http":
         logger.info(f"HTTP transport on http://{host}:{port}/mcp")
@@ -1456,6 +1631,24 @@ if __name__ == "__main__":
         action="store_true",
         help="Clear the on-disk cache before starting (useful when testing)",
     )
+    parser.add_argument(
+        "--pdf-list",
+        action="append",
+        dest="pdf_lists",
+        metavar="CSV",
+        help=(
+            "CSV file of PDFs to auto-register at startup; rows of "
+            "'path' or 'path,description'; directory rows expand to all "
+            "*.pdf inside. Repeatable. Fallback: PDF_MCP_PDF_LIST env var "
+            "(colon-separated)"
+        ),
+    )
     args = parser.parse_args()
 
-    run_server(args.transport, args.host, args.port, clear_cache=args.clear_cache)
+    run_server(
+        args.transport,
+        args.host,
+        args.port,
+        clear_cache=args.clear_cache,
+        pdf_lists=args.pdf_lists,
+    )
