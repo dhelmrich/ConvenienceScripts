@@ -26,6 +26,17 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
+if [ -z "$BLABLADOR_TOKEN" ]; then
+    echo "Error: BLABLADOR_TOKEN is not set." >&2
+    echo "Export your Blablador token before running blacommand, e.g.:" >&2
+    echo '  export BLABLADOR_TOKEN=<your token>' >&2
+    exit 1
+fi
+
+# Unique per-invocation temp file so concurrent runs (e.g. on a shared login node) don't clash.
+CMD_OUTPUT_FILE="$(mktemp)"
+trap 'rm -f "$CMD_OUTPUT_FILE"' EXIT
+
 REQUEST="$*"
 CONTEXT=""
 
@@ -149,21 +160,20 @@ $CONTEXT
     
     case "$SHELL_TYPE" in
         powershell)
-            powershell -Command "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            powershell -Command "$COMMAND" 2>&1 | tee "$CMD_OUTPUT_FILE"
             COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
         zsh)
-            zsh -c "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            zsh -c "$COMMAND" 2>&1 | tee "$CMD_OUTPUT_FILE"
             COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
         *)
-            eval "$COMMAND" 2>&1 | tee /tmp/cmd_output
+            eval "$COMMAND" 2>&1 | tee "$CMD_OUTPUT_FILE"
             COMMAND_EXIT_CODE=${PIPESTATUS[0]}
             ;;
     esac
     
-    COMMAND_OUTPUT=$(cat /tmp/cmd_output)
-    rm -f /tmp/cmd_output
+    COMMAND_OUTPUT=$(cat "$CMD_OUTPUT_FILE")
     
     echo
     if [ $COMMAND_EXIT_CODE -eq 0 ]; then
